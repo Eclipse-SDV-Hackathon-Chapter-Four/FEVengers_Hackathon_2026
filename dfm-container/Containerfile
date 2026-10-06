@@ -1,0 +1,17 @@
+# ---- Build stage ----
+FROM docker.io/library/rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/eclipse-opensovd/fault-lib.git .
+RUN cargo build --release -p dfm_bin \
+ && cargo build --release -p fault_lib --features testutils --example tst_app
+
+# ---- Runtime stage ----
+FROM docker.io/library/debian:bookworm-slim
+COPY --from=build /src/target/release/dfm_bin            /usr/local/bin/dfm_bin
+COPY --from=build /src/target/release/examples/tst_app   /usr/local/bin/tst_app
+COPY --from=build /src/src/fault_lib/tests/data/         /catalogs/
+RUN mkdir -p /store
+ENTRYPOINT ["/usr/local/bin/dfm_bin"]
+CMD ["--catalog-dir", "/catalogs", "--storage-dir", "/store"]
