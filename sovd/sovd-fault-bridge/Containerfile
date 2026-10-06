@@ -1,0 +1,20 @@
+# Created with AI assistance (Claude Opus 5.5, Anthropic).
+# SOVD fault bridge: DFM (iceoryx2 dfm/query) -> SOVD REST /faults
+
+# ---- Build stage ----
+FROM docker.io/library/rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev git \
+    && rm -rf /var/lib/apt/lists/*
+# Same toolchain fault-lib pins
+RUN rustup toolchain install nightly-2025-07-14 --profile minimal
+WORKDIR /src
+COPY Cargo.toml .
+COPY src ./src
+RUN cargo +nightly-2025-07-14 build --release
+
+# ---- Runtime stage ----
+FROM docker.io/library/debian:bookworm-slim
+COPY --from=build /src/target/release/sovd-fault-bridge /usr/local/bin/sovd-fault-bridge
+EXPOSE 7691
+ENTRYPOINT ["/usr/local/bin/sovd-fault-bridge"]
+CMD ["--listen", "0.0.0.0:7691", "--entities", "battery,hvac"]
