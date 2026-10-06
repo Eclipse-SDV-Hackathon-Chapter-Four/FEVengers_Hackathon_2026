@@ -1,4 +1,4 @@
-# Doctor Whodunit - FEVengers
+# Doctor Whodunit
 
 > Every fault leaves evidence. Solve the case.
 
