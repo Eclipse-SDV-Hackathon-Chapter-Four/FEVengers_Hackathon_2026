@@ -1,3 +1,8 @@
+# Disclaimer
+Generated with AI assist
+Claud
+
+# Diagram
 ```mermaid
 flowchart TB
   subgraph AZHW["SEPARATE HARDWARE"]
