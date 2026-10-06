@@ -1,6 +1,6 @@
 # Disclaimer
 Generated with AI assist
-Claud
+Claud Opus 5.5
 
 # DFM Bring-up Guide – Doctor Whodunit (FEVengers)
 
