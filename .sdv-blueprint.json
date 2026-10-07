@@ -1,0 +1,13 @@
+{
+  "name": "Doctor Whodunit - Battery Thermal Guardian",
+  "version": "0.1.0",
+  "description": "A safety evidence factory around an EV thermal-runaway early-warning service: the Battery Thermal Guardian receives the battery temperature as a VSS signal over Eclipse uProtocol, runs on AutoSD under Eclipse Ankaios, reports its faults to the Eclipse OpenSOVD Diagnostic Fault Manager, and is exercised by repeatable fault campaigns that link each injected fault to its detection, mitigation and verdict.",
+  "participatingProjects": [
+    { "id": "automotive.uprotocol" },
+    { "id": "automotive.ankaios" },
+    { "id": "automotive.opensovd" },
+    { "id": "iot.zenoh" },
+    { "id": "iot.mosquitto" },
+    { "id": "technology.iceoryx" }
+  ]
+}
