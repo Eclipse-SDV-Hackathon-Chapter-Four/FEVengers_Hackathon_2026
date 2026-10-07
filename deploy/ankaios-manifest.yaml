@@ -1,0 +1,87 @@
+# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
+#
+# Ankaios manifest for the AutoSD target: every container of the architecture in
+# Docs/Static_View.png. The localhost/*:dev images are produced by
+# deploy/build-images.sh and must be loaded on the target before this is applied.
+#
+# NOT TESTED YET: written from the podman commands documented in
+# Docs/FAULT_CHAIN.md and Docs/SOVD_Bridge_Fault.md, but not applied to an AutoSD system.
+#
+# The target must provide (lost on reboot unless recreated, /tmp is a tmpfs):
+#   /tmp/iceoryx2                 iceoryx2 discovery files, shared by dfm and sovd-bridge
+#   /var/lib/fevengers/catalogs   copy of the repo's catalogs/ folder
+#
+# Data path:
+#   AZ3166 --MQTT--> mqtt-broker --> vss-publisher --uProtocol/Zenoh--> guardian
+#   reporter --iceoryx2--> dfm <--iceoryx2 "dfm/query"-- sovd-bridge <--HTTP :7690-- tester
+apiVersion: v1
+workloads:
+  # Container 1 (Input Handler), part 1: broker the AZ3166 publishes to.
+  mqtt-broker:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: docker.io/library/eclipse-mosquitto:2
+      commandOptions: ["--net=host"]
+      commandArgs: ["/usr/sbin/mosquitto", "-c", "/mosquitto-no-auth.conf"]
+
+  # Container 1 (Input Handler), part 2: MQTT -> VSS -> uProtocol.
+  vss-publisher:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    dependencies:
+      mqtt-broker: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/vss-uprotocol-publisher:dev
+      commandOptions: ["--net=host"]
+
+  # Container 2: Battery Thermal Guardian. Host network so Zenoh scouting
+  # finds the publisher. Once the Guardian reports to the DFM itself
+  # (src/dfm.rs), it also needs the dfm workload's IPC options and mounts,
+  # "--user=0:0" and "--dfm-catalog".
+  guardian:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/battery-thermal-guardian:dev
+      commandOptions: ["--net=host"]
+
+  # Container 3: Diagnostic Fault Manager. iceoryx2 is shared-memory IPC, so
+  # dfm, sovd-bridge and every reporter share the host IPC and PID namespaces,
+  # /dev/shm and /tmp/iceoryx2. label=disable: AutoSD runs SELinux enforcing.
+  dfm:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/dfm:dev
+      commandOptions:
+        - "--ipc=host"
+        - "--pid=host"
+        - "--security-opt=label=disable"
+        - "--volume=/dev/shm:/dev/shm"
+        - "--volume=/tmp/iceoryx2:/tmp/iceoryx2"
+        - "--volume=/var/lib/fevengers/catalogs:/catalogs:ro"
+        - "--volume=dfm-store:/store"
+
+  # Container 4: SOVD REST interface on the DFM. Listens on 7690, the port
+  # of the architecture diagram, which the QEMU start script forwards to the host.
+  sovd-bridge:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    dependencies:
+      dfm: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/sovd-fault-bridge:dev
+      commandOptions:
+        - "--net=host"
+        - "--ipc=host"
+        - "--pid=host"
+        - "--security-opt=label=disable"
+        - "--volume=/dev/shm:/dev/shm"
+        - "--volume=/tmp/iceoryx2:/tmp/iceoryx2"
+      commandArgs: ["--listen", "0.0.0.0:7690", "--entities", "battery"]
