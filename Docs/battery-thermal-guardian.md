@@ -20,56 +20,135 @@ as a VSS signal **over uProtocol** (never from the Data Broker directly),
 checks whether the signal can be trusted, runs the thermal risk state machine
 and publishes **heartbeat, state, fault and mitigation** events over uProtocol.
 
-Diagrams of the state machine, the per-sample checks and the timers, with
-every transition condition: [Docs/guardian-state-machine.html](Docs/guardian-state-machine.html)
-(open the file in a browser; GitHub shows HTML files as source).
+Code: [`battery-thermal-guardian/`](../battery-thermal-guardian/)
+
+## Where it sits
 
 ```mermaid
 flowchart LR
-  VSSUP[VSS uProtocol Publisher<br/>or vss-sim] -->|VssSample JSON<br/>//*/8001/1/8001| SVC
-  subgraph G[guardian]
-    SVC[service.rs<br/>uProtocol binding] --> CORE[guardian.rs<br/>decision core]
-    CORE --> SIG[signal.rs<br/>signal integrity]
-    CORE --> TH[thermal.rs<br/>trend]
-  end
-  SVC -->|0x8001 heartbeat<br/>0x8002 state<br/>0x8003 fault<br/>0x8004 mitigation| OUT[DFM bridge / evidence collector<br/>guardian-monitor]
+  AZ[AZ3166 / ThreadX] -->|MQTT over Wi-Fi| MQ[Mosquitto]
+  MQ -->|az3166/telemetry| P[VSS uProtocol Publisher]
+  P -->|uMessage<br/>//vehicle/8001/1/8001| Z[(uTransport<br/>Zenoh)]
+  Z --> G[Battery Thermal Guardian]
+  G -->|heartbeat · state · fault · mitigation<br/>//vehicle/8002/1/8001…8004| Z2[(uTransport<br/>Zenoh)]
+  Z2 --> C[guardian-monitor<br/>evidence collector]
+  G -->|fault records<br/>fault-lib · iceoryx2| DFM[DFM]
+  DFM --> SOVD[OpenSOVD]
 ```
 
-The decision core is pure: no I/O, no clock, time is an input. The same sample
-sequence always produces the same events, which keeps fault campaigns
-replayable and makes the core testable without a transport.
+The [VSS uProtocol Publisher](vss-uprotocol-publisher.md) turns the board's
+MQTT readings into uProtocol messages. The Guardian only ever sees uProtocol.
 
-## Quick start
+## Run the full chain
+
+All commands run from the repository root.
+
+**1. Build both programs** (release builds are much smaller and faster than debug):
 
 ```sh
-cargo test
+(cd battery-thermal-guardian && cargo build --release)
+(cd vss-uprotocol-publisher && cargo build --release)
 ```
 
-No local Rust toolchain? Use the official Rust image instead:
+**2. Start the chain**, one terminal each:
 
 ```sh
-alias cargo='docker run --rm -it --net=host -u "$(id -u):$(id -g)" -e CARGO_HOME=/w/target/cargo-home -v "$PWD":/w -w /w rust:1-bookworm cargo'
+# MQTT broker
+docker run --rm --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+
+# Guardian
+battery-thermal-guardian/target/release/guardian -c battery-thermal-guardian/config/guardian.toml
+
+# Guardian events, one JSON line each, also saved to a file
+battery-thermal-guardian/target/release/guardian-monitor --no-heartbeat | tee events.jsonl
+
+# Publisher; the correlation id tags every event of this run
+vss-uprotocol-publisher/target/release/vss-uprotocol-publisher -c vss-uprotocol-publisher/config/publisher.toml --correlation-id run-001
 ```
 
-Three terminals (Zenoh peer mode, multicast scouting; all on the same host):
+**Optional: DFM.** To get the catalog faults into the Diagnostic Fault
+Manager as well, start the DFM container first (build it as in
+[DFM bring-up](DFM_BRINGUP.md); its image contains our catalog) and add
+`--dfm-catalog` to the Guardian. Both need the shared-memory options for
+iceoryx2 and must run as the same user:
 
 ```sh
-cargo run --bin guardian -- -c config/demo.toml
-cargo run --bin guardian-monitor -- -c config/demo.toml --no-heartbeat > events.jsonl
-cargo run --bin vss-sim -- overheat -c config/demo.toml --correlation-id run-001
+mkdir -p /tmp/iceoryx2
+podman run -d --name dfm --ipc=host -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 localhost/dfm:dev
+
+battery-thermal-guardian/target/release/guardian -c battery-thermal-guardian/config/guardian.toml \
+  --dfm-catalog dfm-container/battery_guardian_catalog.json
 ```
 
-`vss-sim` scenarios: `nominal`, `overheat`, `runaway`, `stuck`, `spike`,
-`out-of-range`, `dropout`, `delay`, `duplicate`, `reorder`. The fault is active
-between `--fault-start-s` (10) and `--fault-end-s` (25). `vss-sim` only stands in for the
-VSS publisher during development; it does not replace the campaign runner.
+The Guardian also starts without the DFM and connects as soon as it is up
+(see [DFM reporting](#dfm-reporting)).
 
-Container (Podman / Ankaios workload):
+**3. Feed it data**: either the real AZ3166 (it publishes to the broker's
+address on port 1883), or a recorded MQTT log with one JSON message per line,
+sent at one message per second:
 
 ```sh
-podman build -t battery-thermal-guardian -f Containerfile .
+while IFS= read -r line; do echo "$line"; sleep 1; done < mqtt_log.txt \
+  | docker exec -i mosquitto mosquitto_pub -t az3166/telemetry -l
+```
+
+A log taken with `mosquitto_sub -v` has the topic in front of each message;
+strip it first with `cut -d' ' -f2- mqtt_log.txt`. Replaying at a fixed 1 Hz
+keeps repeated counters but not gaps in the original recording.
+
+**What to expect** in the monitor: `CLEAR → MONITORING` after three valid
+readings. If the Guardian waits more than 3 s for the first reading, it first
+reports `TempSourceConnectionLost` and goes to DEGRADED, then returns to
+MONITORING when data arrives. When the replay ends, `TempSourceConnectionLost`
+follows again after 3 s.
+
+### Without the board or the publisher
+
+`vss-sim` publishes a temperature profile directly on the Guardian's input
+topic, optionally with one fault injected between `--fault-start-s` (10) and
+`--fault-end-s` (25):
+
+```sh
+battery-thermal-guardian/target/release/guardian -c battery-thermal-guardian/config/demo.toml
+battery-thermal-guardian/target/release/guardian-monitor -c battery-thermal-guardian/config/demo.toml --no-heartbeat
+battery-thermal-guardian/target/release/vss-sim overheat -c battery-thermal-guardian/config/demo.toml --correlation-id run-001
+```
+
+Scenarios: `nominal`, `overheat`, `runaway`, `stuck`, `spike`, `out-of-range`,
+`dropout`, `delay`, `duplicate`, `reorder`. `config/demo.toml` shortens the
+stuck window and the mitigation timeout so each scenario shows its effect
+within about a minute. `vss-sim` is a development aid; it does not replace the
+fault campaign runner.
+
+### As a container (Podman / Ankaios workload)
+
+```sh
+podman build -t battery-thermal-guardian -f battery-thermal-guardian/Containerfile battery-thermal-guardian
 podman run --rm --net=host battery-thermal-guardian
 ```
+
+With DFM reporting, the container needs the iceoryx2 options and the catalog;
+the full command is at the top of the
+[`Containerfile`](../battery-thermal-guardian/Containerfile).
+
+### If the monitor shows nothing
+
+The programs find each other through Zenoh multicast scouting, which VPNs,
+corporate networks or WSL2 can block. Connect them through a fixed address
+instead. Create `zenoh-listen.json5`:
+
+```json5
+{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
+```
+
+and `zenoh-connect.json5`:
+
+```json5
+{ mode: "peer", connect: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
+```
+
+Start the Guardian first with `--zenoh-config zenoh-listen.json5`, then the
+monitor, the publisher and `vss-sim` with `--zenoh-config zenoh-connect.json5`.
 
 ## State machine
 
@@ -83,14 +162,17 @@ stateDiagram-v2
   CRITICAL --> MITIGATING: mitigation requested
   MITIGATING --> MONITORING: T < critical_c - hysteresis for recovery_hold_ms
   MITIGATING --> CRITICAL: no improvement within mitigation_timeout_ms
-  CLEAR --> DEGRADED: signal stale / stuck
-  MONITORING --> DEGRADED: signal stale / stuck
-  WARNING --> DEGRADED: signal stale / stuck
+  CLEAR --> DEGRADED: signal lost / stuck
+  MONITORING --> DEGRADED: signal lost / stuck
+  WARNING --> DEGRADED: signal lost / stuck
   DEGRADED --> MONITORING: signal trusted again
 ```
 
+With the defaults: WARNING at 55 °C or a rise of 0.5 °C/s over 10 s, CRITICAL
+after 65 °C for 2 s, recovery below 62 °C for 5 s, mitigation timeout 30 s.
+
 `DEGRADED` extends the suggested state machine from the challenge README. A
-stale or stuck temperature must not leave the Guardian quietly in MONITORING,
+lost or stuck temperature must not leave the Guardian quietly in MONITORING,
 because that would turn off the warning chain without anyone noticing.
 Instead the Guardian raises a fault and requests a fallback mitigation.
 
@@ -107,6 +189,10 @@ mitigation timeout keeps running, so it can still escalate.
 All active mitigations are `RELEASED` when the condition improves or the signal
 becomes trusted again.
 
+The decision core is pure: no I/O and no clock; time is an input. The same
+sample sequence always produces the same events, which keeps fault campaigns
+replayable.
+
 ## Signal integrity
 
 Each sample passes these checks in order. A sample that fails a check is
@@ -117,47 +203,69 @@ stream that stays bad (delayed, out of range, spiking) ends in
 
 | Fault | DFM catalog id | Class | Detection | Effect |
 |---|---|---|---|---|
-| `TransportDuplicate` | – | Transport | same `seq` as previous | sample discarded |
-| `TransportOutOfOrder` | – | Transport | older `seq` / send time | sample discarded |
+| `TransportDuplicate` | – | Transport | same `rolling_counter` as previous | sample discarded |
+| `TransportOutOfOrder` | – | Transport | older `rolling_counter` / send time | sample discarded |
 | `TransportDelay` | – | Transport | arrival − uMessage creation time > `max_latency_ms` | sample discarded |
 | `TempOutOfRange` | `btg.temp.out_of_range` | Signal | outside `[min_c, max_c]` or NaN | sample discarded |
 | `TempSignalSpike` | `btg.temp.spike` | Signal | rate > `max_rate_c_per_s`, not confirmed by next sample | sample discarded |
 | `TempSignalStuck` | `btg.temp.stuck` | Signal | value unchanged for `stuck_window_ms` | **DEGRADED** |
 | `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | no accepted sample for `stale_timeout_ms` | **DEGRADED** |
-| `PayloadInvalid` | – | Transport | payload is not a `VssSample` | message discarded |
+| `PayloadInvalid` | – | Transport | payload is not a `VssSample`, or no UUIDv7 message id | message discarded |
 
 Fault names and ids match the DFM fault catalog
 [`dfm-container/battery_guardian_catalog.json`](../dfm-container/battery_guardian_catalog.json)
 (catalog `battery`). Fault events carry the id in `catalog_id`. The transport
 faults are Guardian-internal: they are published on the fault topic with
-`catalog_id: null` and are not meant to be forwarded to the DFM.
+`catalog_id: null` and are not forwarded to the DFM. The catalog faults are
+also reported to the DFM, see [DFM reporting](#dfm-reporting).
 
 A fast change that the next sample confirms is accepted, not filtered. Real
 thermal runaway can rise very quickly, and a spike filter must not hide it.
 
-Gaps in `seq` are counted as `missing` in the heartbeat. A lower `seq` with a
-newer send time is treated as a publisher restart, not as reordering.
+Ordering uses the device's `rolling_counter`, which wraps (`counter_modulus`,
+256 for the AZ3166: 255 → 0). A counter less than half the range ahead is
+newer, otherwise older:
+
+| previous → new counter | Guardian sees |
+|---|---|
+| 254 → 254 | duplicate |
+| 254 → 255, 255 → 0 | next reading |
+| 254 → 1 | next reading, 2 counted as `missing` |
+| 5 → 3, sent earlier | out of order |
+| 120 → 0, sent later | device restart: accepted, counting continues from 0 |
+
+Gaps are counted as `missing` in the heartbeat. A board whose counter has
+frozen produces only duplicates, so no sample is accepted and the Guardian
+raises `TempSourceConnectionLost` and goes to DEGRADED.
 
 ## uProtocol contract
 
-Guardian uEntity: authority `vehicle`, ID `0x8002`, version 1. All payloads are
-`UPAYLOAD_FORMAT_JSON`; see [src/contract.rs](src/contract.rs).
+All payloads are `UPAYLOAD_FORMAT_JSON`; the structs are in
+[`src/contract.rs`](../battery-thermal-guardian/src/contract.rs).
+
+**Address plan** (service IDs from the uProtocol vendor range `0x8000–0xFFFE`):
+
+| Component | authority | service ID | instance | version | topics |
+|---|---|---|---|---|---|
+| VSS uProtocol Publisher | `vehicle` | `0x8001` | 0 | 1 | `0x8001` temperature |
+| Battery Thermal Guardian | `vehicle` | `0x8002` | 0 | 1 | `0x8001` heartbeat, `0x8002` state, `0x8003` fault, `0x8004` mitigation |
+
+The authority name is a placeholder until the team picks one; both components
+must use the same.
 
 **Input**: `//*/8001/1/8001` (configurable)
 
 ```json
 {"path": "Vehicle.Powertrain.TractionBattery.Temperature.Max",
- "value": 41.7, "seq": 1234, "rolling_counter": 210, "correlation_id": "run-001"}
+ "value": 41.7, "rolling_counter": 210, "correlation_id": "run-001"}
 ```
 
 The sample time is the creation time of the uMessage: its id is a UUIDv7,
-which records when the
-[VSS uProtocol Publisher](../vss-uprotocol-publisher/README.md) built it
-(read with `UUID::get_time()`). A message without such an id is reported as
-`PayloadInvalid`. `seq` increments by one per sample. `rolling_counter` (the
-device's alive counter) and `correlation_id` are optional. Both are echoed in
-the `trigger` of every event the sample triggers. The heartbeat reports the
-`rolling_counter` of the last accepted sample.
+which records when the publisher built it (read with `UUID::get_time()`).
+`rolling_counter` is the device's counter (+1 per reading, wraps to 0);
+`correlation_id` is optional. Both are echoed in the `trigger` of every event
+the sample triggers. The heartbeat reports the `rolling_counter` of the last
+accepted sample.
 
 **Output**
 
@@ -168,34 +276,94 @@ the `trigger` of every event the sample triggers. The heartbeat reports the
 | 0x8003 | fault | `seq, fault, catalog_id, class, status (RAISED/CLEARED), detail, state, at_ms, trigger` |
 | 0x8004 | mitigation | `seq, action, status (REQUESTED/RELEASED), reason, at_ms, trigger` |
 
-`seq` on state/fault/mitigation is one Guardian-wide counter. Zenoh does not
+`seq` on state/fault/mitigation is one Guardian-wide counter, numbered by the
+Guardian itself (it has nothing to do with the input). Zenoh does not
 order messages across topics, so evidence should be ordered by `seq`.
 `at_ms` is the Guardian's time when the event happened. `trigger` points back
-to the input sample: its `seq`, `sent_ms` (when the publisher created the
-uMessage), `value`, `rolling_counter`, uProtocol `message_id` and
+to the input sample: its `rolling_counter`, `sent_ms` (when the publisher
+created the uMessage), `value`, uProtocol `message_id` and
 `correlation_id`. Time-driven events such as `TempSourceConnectionLost` have
 no trigger. Detection latency is the event's `at_ms` minus the injection time
 recorded by the campaign runner.
 
+## DFM reporting
+
+Faults with a catalog id are reported to the Diagnostic Fault Manager with
+Eclipse OpenSOVD [fault-lib](https://github.com/eclipse-opensovd/fault-lib)
+(code: [`src/dfm.rs`](../battery-thermal-guardian/src/dfm.rs)). It is on when
+a catalog is configured (`[dfm] catalog` or `--dfm-catalog`); the file must be
+the same one the DFM loads.
+
+| Fault event | DFM record |
+|---|---|
+| `RAISED` | `LifecycleStage::Failed` |
+| `CLEARED` | `LifecycleStage::Passed` |
+
+- **Entity path**: the catalog id, `battery`. Source: entity
+  `BatteryThermalGuardian`, ECU = the uProtocol authority.
+- **Environment data** of each record (the DFM keeps it from the last
+  failure): `detail`, `guardian_state`, `event_seq`, `at_ms` and, if a sample
+  triggered the fault, `rolling_counter`, `sample_value`, `message_id`,
+  `correlation_id`. Values are cut to 64 bytes (fault-lib limit). With these,
+  a DFM record links back to the uProtocol fault event and the test run.
+- **Connection**: on connect, fault-lib checks the catalog hash with the DFM,
+  so a DFM with another version of the catalog is refused. While the DFM is
+  not reachable, the Guardian keeps working, retries every `retry_period_ms`
+  and remembers the latest status of each fault; after connecting it reports
+  those, so the DFM catches up with the current state.
+- fault-lib runs on its own thread, so a slow or missing DFM never delays the
+  Guardian's decisions or its uProtocol events.
+
+The Guardian is built against fault-lib revision `12dac50`; the DFM
+container is pinned to the same revision.
+
 ## Configuration
 
-[config/guardian.toml](config/guardian.toml) lists every option with its
-default. [config/demo.toml](config/demo.toml) shortens the stuck and
-mitigation windows so demos stay short. Unknown keys are rejected. Logging is
-controlled by `RUST_LOG` and goes to stderr.
+[`config/guardian.toml`](../battery-thermal-guardian/config/guardian.toml)
+lists every option with its default.
+[`config/demo.toml`](../battery-thermal-guardian/config/demo.toml) shortens the
+stuck and mitigation windows for demos. Unknown keys are rejected. `-c` selects
+the file, `--zenoh-config` a Zenoh configuration, `--dfm-catalog` the DFM
+catalog. Logging is controlled by
+`RUST_LOG` (e.g. `RUST_LOG=debug`) and goes to stderr.
 
-## Tests
+## Development
 
-- [tests/guardian_core.rs](tests/guardian_core.rs): behavior of the core for
-  every state transition and fault class, latching, event numbering, and
-  deterministic replay.
-- [tests/uprotocol_service.rs](tests/uprotocol_service.rs): the service end to
-  end over up-rust's in-process `LocalTransport`, so real uProtocol messages and
-  no Zenoh.
+Building needs `clang` and `libclang-dev`: iceoryx2, which fault-lib uses,
+generates its bindings with bindgen. Tests need no broker, no Zenoh, no DFM
+and no network:
+
+```sh
+cd battery-thermal-guardian && cargo test
+```
+
+- [`tests/guardian_core.rs`](../battery-thermal-guardian/tests/guardian_core.rs):
+  the decision core with simulated time; every state transition and fault
+  class, latching, event numbering and deterministic replay.
+- [`tests/uprotocol_service.rs`](../battery-thermal-guardian/tests/uprotocol_service.rs):
+  the service end to end with real uMessages over up-rust's in-process
+  `LocalTransport` instead of Zenoh.
+- [`tests/fault_catalog.rs`](../battery-thermal-guardian/tests/fault_catalog.rs):
+  fault names and ids against `dfm-container/battery_guardian_catalog.json`,
+  so the tests need the whole repository.
+- Unit tests in [`src/dfm.rs`](../battery-thermal-guardian/src/dfm.rs): fault
+  event to DFM record (stage, environment data). The connection to a running
+  DFM is not part of `cargo test`.
+
+No local Rust toolchain? Use the official Rust image with libclang added:
+
+```sh
+printf 'FROM docker.io/library/rust:1-bookworm\nRUN apt-get update && apt-get install -y clang libclang-dev\n' \
+  | docker build -t rust-clang -
+alias cargo='docker run --rm -it --net=host -u "$(id -u):$(id -g)" -e CARGO_HOME=/w/target/cargo-home -v "$PWD":/w -w /w rust-clang cargo'
+```
 
 ## Not yet covered
 
-- DFM fault records / OpenSOVD: fault events carry the DFM catalog id
-  (`catalog_id`), but there is no `fault_lib`/iceoryx2 reporter yet.
+- OpenSOVD: catalog faults reach the DFM, but their exposure through OpenSOVD
+  is not verified yet.
+- Transport faults are not in the DFM catalog, so they do not reach the DFM.
+- Readings that MQTT delivers back to back after a Wi-Fi hiccup are sent
+  milliseconds apart and can trip the spike check.
 - Drift detection needs a second, redundant temperature signal.
 - Latency checks need publisher and Guardian clocks to agree (same host or NTP).

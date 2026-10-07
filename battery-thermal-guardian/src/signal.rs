@@ -29,7 +29,7 @@
 //!
 //! | check         | fault                                      | compares                               |
 //! |---------------|--------------------------------------------|----------------------------------------|
-//! | `check_order` | TransportDuplicate / TransportOutOfOrder   | seq and send time vs previous sample   |
+//! | `check_order` | TransportDuplicate / TransportOutOfOrder   | rolling counter, send time vs previous |
 //! | latency       | TransportDelay                             | arrival time - uMessage creation time  |
 //! | range         | TempOutOfRange                             | value with [min_c, max_c]              |
 //! | `check_spike` | TempSignalSpike                            | rate of change vs last accepted value  |
@@ -94,9 +94,9 @@ pub struct SignalMonitor {
     cfg: SignalConfig,
     /// Guardian start time; reference for "no sample since start".
     start_ms: u64,
-    /// seq and send time of the last sample that passed the order check
-    /// (even if a later check rejected it).
-    last_seq: Option<u64>,
+    /// Rolling counter and send time of the last sample that passed the
+    /// order check (even if a later check rejected it).
+    last_counter: Option<u64>,
     last_sent_ms: Option<u64>,
     /// Last sample that passed *all* checks: the value we currently trust.
     last_accepted: Option<Point>,
@@ -117,7 +117,7 @@ impl SignalMonitor {
         Self {
             cfg,
             start_ms,
-            last_seq: None,
+            last_counter: None,
             last_sent_ms: None,
             last_accepted: None,
             last_accepted_rx_ms: None,
@@ -181,7 +181,7 @@ impl SignalMonitor {
             return self.reject(kind, detail, changes);
         }
         // From here on this sample is "the newest one" for the order check.
-        self.last_seq = Some(s.seq);
+        self.last_counter = Some(s.rolling_counter);
         self.last_sent_ms = Some(sent_ms);
 
         // 2. Latency: how long between the publisher creating the message and
@@ -270,39 +270,50 @@ impl SignalMonitor {
         changes
     }
 
-    /// Duplicate / reordering check based on `seq` and the send time.
-    /// Returns the fault if the sample must be rejected.
+    /// Duplicate / reordering check based on the device's rolling counter
+    /// and the send time. Returns the fault if the sample must be rejected.
     fn check_order(&mut self, s: &VssSample, sent_ms: u64) -> Option<(FaultKind, String)> {
         // First sample ever: nothing to compare with.
-        let (Some(last_seq), Some(last_sent)) = (self.last_seq, self.last_sent_ms) else {
+        let (Some(last), Some(last_sent)) = (self.last_counter, self.last_sent_ms) else {
             return None;
         };
-        // Same seq again: re-delivery (or a device whose counter is frozen).
-        if s.seq == last_seq {
+        let counter = s.rolling_counter;
+        // The counter wraps (255 -> 0), so compare by how many steps it moved
+        // forward, modulo its range: 0 = same reading, less than half the
+        // range = newer, otherwise older. With 256 values: 254 -> 1 is 3
+        // steps ahead (2 readings lost), 5 -> 3 is 254 steps, i.e. 2 back.
+        let m = self.cfg.counter_modulus;
+        let ahead = (counter % m + m - last % m) % m;
+        let newer = ahead > 0 && ahead < m / 2;
+
+        // Same counter again: re-delivery (or a device whose counter is frozen).
+        if ahead == 0 {
             return Some((
                 FaultKind::TransportDuplicate,
-                format!("seq {} already received", s.seq),
+                format!("counter {counter} already received"),
             ));
         }
-        // Lower seq and not newer: an old sample overtaken by a newer one.
-        if s.seq < last_seq && sent_ms <= last_sent {
+        // Older counter and not sent later: an old sample overtaken by a newer one.
+        if !newer && sent_ms <= last_sent {
             return Some((
                 FaultKind::TransportOutOfOrder,
-                format!("seq {} received after seq {last_seq}", s.seq),
+                format!("counter {counter} received after counter {last}"),
             ));
         }
-        // Higher seq but time went backwards: also not trustworthy.
-        if s.seq > last_seq && sent_ms < last_sent {
+        // Newer counter but time went backwards: also not trustworthy.
+        if newer && sent_ms < last_sent {
             return Some((
                 FaultKind::TransportOutOfOrder,
                 format!("sent at {sent_ms}, older than {last_sent}"),
             ));
         }
-        // seq jumped (e.g. 5 -> 8): samples got lost on the way. Counted, not rejected.
-        if s.seq > last_seq + 1 {
-            self.counters.missing += s.seq - last_seq - 1;
+        // Counter jumped (e.g. 5 -> 8): readings got lost. Counted, not rejected.
+        if newer {
+            self.counters.missing += ahead - 1;
         }
-        // seq < last_seq but sent later: the publisher restarted its counter.
+        // Older counter but sent later: the device restarted (counter reset)
+        // or was silent for more than half the counter range. Accepted; the
+        // order check continues from this counter.
         None
     }
 

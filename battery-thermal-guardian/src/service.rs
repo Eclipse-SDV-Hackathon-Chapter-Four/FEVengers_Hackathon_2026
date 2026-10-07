@@ -20,9 +20,10 @@
 //! transport is injected, so the same code runs over Zenoh in production and
 //! over an in-process transport in tests.
 //!
-//! This is the only file in the Guardian that does I/O or reads the clock.
-//! Its job is to translate: uMessage in -> `Guardian` method call ->
-//! `GuardianEvent`s out -> uMessages. All decisions live in guardian.rs.
+//! Together with dfm.rs, this is the only code in the Guardian that does I/O
+//! or reads the clock. Its job is to translate: uMessage in -> `Guardian`
+//! method call -> `GuardianEvent`s out -> uMessages (and DFM records for
+//! catalog faults). All decisions live in guardian.rs.
 
 use std::future::Future;
 use std::str::FromStr;
@@ -38,7 +39,8 @@ use up_rust::{
 };
 
 use crate::config::GuardianConfig;
-use crate::contract::{resource, VssSample};
+use crate::contract::{resource, GuardianEvent, VssSample};
+use crate::dfm::DfmReporter;
 use crate::guardian::Guardian;
 
 /// How many received messages may wait for the service loop. Samples arrive
@@ -69,7 +71,7 @@ struct InputListener {
 impl UListener for InputListener {
     async fn on_receive(&self, msg: UMessage) {
         // try_send never waits: if the queue is full the message is dropped
-        // (and later shows up as a seq gap / stale signal in the Guardian).
+        // (and later shows up as a counter gap / stale signal in the Guardian).
         if self.tx.try_send(msg).is_err() {
             warn!("input queue full, message dropped");
         }
@@ -97,6 +99,10 @@ pub async fn run(
     let input_filter = UUri::from_str(&up.input_topic).map_err(|e| {
         UStatus::fail_with_code(UCode::INVALID_ARGUMENT, format!("input_topic: {e}"))
     })?;
+
+    // DFM reporting runs on its own thread; None if no catalog is configured.
+    let dfm = DfmReporter::start(&cfg.dfm, &up.authority)
+        .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e))?;
 
     // Subscribe: from now on every matching uMessage ends up in `rx`.
     let (tx, mut rx) = mpsc::channel(INPUT_QUEUE_LEN);
@@ -158,8 +164,11 @@ pub async fn run(
 
         // Publish every event the Guardian produced in this step, in order.
         // Each event type has its own topic (state 0x8002, fault 0x8003,
-        // mitigation 0x8004).
+        // mitigation 0x8004). Catalog faults also go to the DFM.
         for event in events {
+            if let (Some(dfm), GuardianEvent::Fault(fault)) = (&dfm, &event) {
+                dfm.report(fault);
+            }
             publish(&*transport, &uri, event.resource_id(), event.to_json()).await;
         }
     }

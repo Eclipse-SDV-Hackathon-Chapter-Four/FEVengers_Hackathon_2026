@@ -46,6 +46,9 @@
 //! 5. Everything that happened in that step comes back to [`service`] as a list
 //!    of [`contract::GuardianEvent`]s (fault, state change, mitigation). The
 //!    service publishes each one on its own uProtocol topic.
+//! 6. Fault events of faults in the DFM catalog also go to [`dfm`], which
+//!    reports them to the Diagnostic Fault Manager with fault-lib (iceoryx2).
+//!    OpenSOVD exposes them from there.
 //!
 //! Next to the samples, two timers drive the loop in [`service`]:
 //! - a **tick** every 100 ms calls [`guardian::Guardian::on_tick`]. That is how
@@ -59,6 +62,7 @@
 //! - [`contract`]: payloads and topic IDs shared with other components (start here)
 //! - [`config`]: all thresholds and timings, loaded from TOML
 //! - [`service`]: uProtocol binding (subscribe VSS, publish events), the only async part
+//! - [`dfm`]: reports catalog faults to the Diagnostic Fault Manager (own thread)
 //! - [`guardian`]: deterministic decision core and state machine (no I/O, no clock)
 //! - [`signal`]: signal integrity checks and fault lifecycle
 //! - [`thermal`]: temperature rise rate over a sliding window
@@ -66,6 +70,7 @@
 
 pub mod config;
 pub mod contract;
+pub mod dfm;
 pub mod guardian;
 pub mod service;
 pub mod signal;

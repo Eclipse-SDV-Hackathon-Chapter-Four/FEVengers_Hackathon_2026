@@ -18,14 +18,15 @@
 //!
 //! The TOML sections map 1:1 to the structs below: `[uprotocol]` ->
 //! `UProtocolConfig`, `[signal]` -> `SignalConfig`, `[thermal]` ->
-//! `ThermalConfig`. See config/guardian.toml for a file with all defaults.
+//! `ThermalConfig`, `[dfm]` -> `DfmConfig`. See config/guardian.toml for a
+//! file with all defaults.
 //!
 //! `#[serde(default)]` fills missing fields from the `Default` impl;
 //! `deny_unknown_fields` turns a typo in the file into an error instead of a
 //! silently ignored setting.
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::contract::VSS_BATTERY_TEMPERATURE_MAX;
 
@@ -36,6 +37,7 @@ pub struct GuardianConfig {
     pub uprotocol: UProtocolConfig,
     pub signal: SignalConfig,
     pub thermal: ThermalConfig,
+    pub dfm: DfmConfig,
 }
 
 /// Addressing and timing of the uProtocol side (used by service.rs).
@@ -99,6 +101,9 @@ pub struct SignalConfig {
     pub heal_samples: u32,
     /// Consecutive accepted samples required before the signal is trusted.
     pub trust_samples: u32,
+    /// Number of values of the device's rolling counter: it counts
+    /// 0..counter_modulus-1 and then starts at 0 again (256 = 8-bit counter).
+    pub counter_modulus: u64,
 }
 
 impl Default for SignalConfig {
@@ -116,12 +121,14 @@ impl Default for SignalConfig {
             stuck_epsilon_c: 0.0,
             heal_samples: 5,
             trust_samples: 3,
+            counter_modulus: 256,
         }
     }
 }
 
 /// Thermal risk thresholds of the state machine.
-// Used by guardian.rs (evaluate_thermal). Diagram of the state machine: README.
+// Used by guardian.rs (evaluate_thermal). Diagram of the state machine:
+// Docs/battery-thermal-guardian.md.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThermalConfig {
@@ -160,6 +167,26 @@ impl Default for ThermalConfig {
     }
 }
 
+/// Reporting of catalog faults to the Diagnostic Fault Manager (used by dfm.rs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DfmConfig {
+    /// DFM fault catalog (JSON), the same file the DFM loads. Not set = no
+    /// DFM reporting; faults are still published over uProtocol.
+    pub catalog: Option<PathBuf>,
+    /// How often to retry connecting while the DFM is not reachable.
+    pub retry_period_ms: u64,
+}
+
+impl Default for DfmConfig {
+    fn default() -> Self {
+        Self {
+            catalog: None,
+            retry_period_ms: 5000,
+        }
+    }
+}
+
 impl GuardianConfig {
     /// Parses TOML text and validates the result.
     pub fn from_toml_str(s: &str) -> Result<Self, String> {
@@ -192,11 +219,19 @@ impl GuardianConfig {
         if s.trust_samples == 0 || s.heal_samples == 0 || s.spike_confirm_samples == 0 {
             return Err("signal.*_samples values must be at least 1".into());
         }
+        // At least 4 values, so that "newer" (less than half the range ahead)
+        // and "older" can be told apart.
+        if s.counter_modulus < 4 {
+            return Err("signal.counter_modulus must be at least 4".into());
+        }
         if s.stale_timeout_ms == 0 || self.uprotocol.tick_period_ms == 0 {
             return Err("stale_timeout_ms and tick_period_ms must be positive".into());
         }
         if self.uprotocol.heartbeat_period_ms == 0 {
             return Err("uprotocol.heartbeat_period_ms must be positive".into());
+        }
+        if self.dfm.retry_period_ms == 0 {
+            return Err("dfm.retry_period_ms must be positive".into());
         }
         Ok(())
     }

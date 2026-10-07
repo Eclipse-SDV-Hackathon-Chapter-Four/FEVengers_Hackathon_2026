@@ -121,7 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let period = Duration::from_secs_f64(1.0 / args.rate_hz);
     let mut interval = tokio::time::interval(period);
-    let mut seq = 0u64;
+    // Rolling counter like the AZ3166's: +1 per published reading, 255 -> 0.
+    let mut counter = 0u64;
     // Stuck scenario: the value at the start of the fault window.
     let mut frozen: Option<f64> = None;
     // Reorder scenario: a message held back to be sent after the next one.
@@ -148,15 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
 
-        seq += 1;
+        counter = (counter + 1) % 256;
         let sample = VssSample {
             path: up.vss_path.clone(),
             value: (value * 10.0).round() / 10.0, // 0.1 C resolution, like a real sensor
-            seq,
-            rolling_counter: Some(seq % 256), // mimics an 8-bit device counter
+            rolling_counter: counter,
             correlation_id: args.correlation_id.clone(),
         };
-        info!(seq, value = sample.value, in_fault, "sample");
+        info!(counter, value = sample.value, in_fault, "sample");
         // Build the uMessage now: its id records this moment as the sample
         // time, even if the message is sent later (delay / reorder).
         let msg = match build_message(&topic, &sample) {
@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut batch = vec![msg];
         if in_fault {
             match args.scenario {
-                // Same message twice -> Guardian sees the same seq twice.
+                // Same message twice -> Guardian sees the same counter twice.
                 Scenario::Duplicate => batch.push(batch[0].clone()),
                 // Hold one message back, send it after the next one.
                 Scenario::Reorder => match held_back.take() {

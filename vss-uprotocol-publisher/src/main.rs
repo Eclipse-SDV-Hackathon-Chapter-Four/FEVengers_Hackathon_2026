@@ -72,8 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
     let publisher = VssPublisher::new(transport, &cfg.uprotocol);
-    // The mapper keeps state between messages (seq, last counter), hence `mut`.
-    let mut mapper = Mapper::new(cfg.mapping.clone(), args.correlation_id);
+    let mapper = Mapper::new(cfg.mapping.clone(), args.correlation_id);
 
     // Input side: MQTT client. rumqttc splits it in two halves:
     // - `client` sends requests (subscribe, publish) to the broker;

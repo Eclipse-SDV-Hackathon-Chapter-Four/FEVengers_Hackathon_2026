@@ -14,15 +14,24 @@
 # VSS uProtocol Publisher container image (Podman / Ankaios workload).
 #   podman build -t vss-uprotocol-publisher -f Containerfile .
 #   podman run --rm --net=host vss-uprotocol-publisher
+
+# ---- Build stage ----
+# Full Rust toolchain; compiles the publisher in release mode.
 FROM docker.io/library/rust:1-bookworm AS build
 WORKDIR /src
+# Manifest and lock file first, then the sources.
 COPY Cargo.toml Cargo.lock ./
 COPY src src
+# --locked: build exactly the dependency versions in Cargo.lock.
 RUN cargo build --release --locked --bins
 
+# ---- Runtime stage ----
+# Small Debian image with only the binaries and the default configuration.
 FROM docker.io/library/debian:bookworm-slim
-COPY --from=build /src/target/release/vss-uprotocol-publisher /usr/local/bin/
+# vss-listen is a test tool, started from the same image with --entrypoint.
+COPY --from=build /src/target/release/vss-uprotocol-publisher /src/target/release/vss-listen /usr/local/bin/
 COPY config/publisher.toml /etc/vss-uprotocol-publisher/publisher.toml
+# Run as "nobody": the publisher needs no privileges.
 USER 65534:65534
 ENTRYPOINT ["vss-uprotocol-publisher"]
 CMD ["--config", "/etc/vss-uprotocol-publisher/publisher.toml"]

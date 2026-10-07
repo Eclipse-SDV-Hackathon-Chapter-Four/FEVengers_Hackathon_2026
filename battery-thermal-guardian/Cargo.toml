@@ -45,6 +45,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 up-rust = { version = "0.9.0", default-features = false }
 up-transport-zenoh = "0.9.1"
+# DFM reporting (Eclipse OpenSOVD fault-lib, iceoryx2 IPC), see src/dfm.rs.
+# `common` is the fault-lib crate with the shared types (FaultId, LifecycleStage, ...).
+fault_lib = { git = "https://github.com/eclipse-opensovd/fault-lib.git", rev = "12dac502616701734f90a61edca1326ae2ac6506" }
+fault_common = { package = "common", git = "https://github.com/eclipse-opensovd/fault-lib.git", rev = "12dac502616701734f90a61edca1326ae2ac6506" }
 
 [dev-dependencies]
 up-rust = { version = "0.9.0", default-features = false, features = ["util"] }
