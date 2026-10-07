@@ -100,9 +100,12 @@ vss-uprotocol-publisher/target/release/vss-listen -c vss-uprotocol-publisher/con
 `sent_ms` is the creation time from the uMessage id, `latency_ms` the time
 until it arrived. In the publisher itself, `RUST_LOG=info,zenoh=warn,vss_uprotocol_publisher=debug`
 logs every published sample, and `reading dropped` warnings show MQTT messages
-that could not be mapped. If `vss-listen` shows nothing, see
-[If the monitor shows nothing](battery-thermal-guardian.md#if-the-monitor-shows-nothing)
-(Zenoh discovery). From the container image:
+that could not be mapped. If `vss-listen` shows nothing, connect through a
+fixed address (see
+[If the monitor shows nothing](battery-thermal-guardian.md#if-the-monitor-shows-nothing)):
+without the Guardian, `vss-listen` takes its place and uses
+`config/zenoh-listen.json5`, the publisher or `vss-sim` uses
+`config/zenoh-connect.json5`. From the container image:
 `podman run --rm --net=host --entrypoint vss-listen vss-uprotocol-publisher -c /etc/vss-uprotocol-publisher/publisher.toml`.
 
 ### Simulated source (vss-sim)

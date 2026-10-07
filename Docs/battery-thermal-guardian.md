@@ -159,22 +159,25 @@ the full command is at the top of the
 ### If the monitor shows nothing
 
 The programs find each other through Zenoh multicast scouting, which VPNs,
-corporate networks or WSL2 can block. Connect them through a fixed address
-instead. Create `zenoh-listen.json5`:
+corporate networks, Wi-Fi or containers without `--net=host` can block.
+Connect them through a fixed address instead, with the two files in
+[`config/`](../config/) at the repository root:
 
-```json5
-{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
-```
+| File | For | What it does |
+|---|---|---|
+| [`zenoh-listen.json5`](../config/zenoh-listen.json5) | Guardian | listens on `tcp/127.0.0.1:7447`, multicast off |
+| [`zenoh-connect.json5`](../config/zenoh-connect.json5) | everything else | connects to `tcp/127.0.0.1:7447`, multicast off |
 
-and `zenoh-connect.json5`:
+Start the Guardian first with `--zenoh-config config/zenoh-listen.json5`,
+then the monitor, the publisher, `vss-sim` and `vss-listen` with
+`--zenoh-config config/zenoh-connect.json5`. The connecting programs also
+reach each other through the Guardian (e.g. `vss-listen` sees `vss-sim`).
+In containers, mount the folder: `-v $PWD/config:/etc/zenoh:ro` and pass
+`--zenoh-config /etc/zenoh/zenoh-listen.json5` (or `zenoh-connect.json5`).
 
-```json5
-{ mode: "peer", connect: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
-```
-
-Start the Guardian first with `--zenoh-config zenoh-listen.json5`, then the
-monitor, the publisher, `vss-sim` and `vss-listen` with
-`--zenoh-config zenoh-connect.json5`.
+`127.0.0.1` works as long as all programs run on the same machine, e.g. all
+containers in the AutoSD VM with `--net=host`. For programs on other machines,
+see the comments in the two files.
 
 ## State machine
 
