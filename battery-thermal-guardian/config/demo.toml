@@ -11,7 +11,8 @@
 #
 # SPDX-License-Identifier: EPL-2.0 AND CC0-1.0
 
-# Shorter windows so every vss-sim scenario shows its effect within ~1 minute.
+# Shorter windows so every vss-sim scenario (vss-uprotocol-publisher) shows
+# its effect within ~1 minute.
 
 [signal]
 stuck_window_ms = 5000

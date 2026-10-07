@@ -101,7 +101,7 @@ pub async fn run(
     })?;
 
     // DFM reporting runs on its own thread; None if no catalog is configured.
-    let dfm = DfmReporter::start(&cfg.dfm, &up.authority)
+    let dfm = DfmReporter::start(&cfg.dfm)
         .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e))?;
 
     // Subscribe: from now on every matching uMessage ends up in `rx`.

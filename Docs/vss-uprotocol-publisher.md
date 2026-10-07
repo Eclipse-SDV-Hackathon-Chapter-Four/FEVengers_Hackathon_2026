@@ -46,15 +46,39 @@ From the repository root:
 ```sh
 (cd vss-uprotocol-publisher && cargo build --release)
 
-docker run --rm --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
-vss-uprotocol-publisher/target/release/vss-uprotocol-publisher -c vss-uprotocol-publisher/config/publisher.toml
+# MQTT broker in the background (-d); its log: docker logs -f mosquitto
+docker run -d --rm --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+
+# Publisher in the foreground (Ctrl-C stops it); debug shows every published sample
+RUST_LOG=info,zenoh=warn,vss_uprotocol_publisher=debug \
+  vss-uprotocol-publisher/target/release/vss-uprotocol-publisher -c vss-uprotocol-publisher/config/publisher.toml
 ```
 
-Send one reading by hand:
+The publisher logs `connected to MQTT broker`. Send one reading by hand from
+a second terminal:
 
 ```sh
 docker exec mosquitto mosquitto_pub -t az3166/telemetry \
   -m '{"temperature_degC": 24.65, "counter": 1}'
+```
+
+The publisher then logs `publish sample=VssSample { ..., rolling_counter: 1, ... }`.
+Lines like `New client connected from ::1 ...` in the broker log are normal:
+that is `mosquitto_pub` (or the publisher) connecting. Stop the broker with
+`docker stop mosquitto`.
+
+To run it together with the Guardian and replay a recorded MQTT log, see
+[Run the full chain](battery-thermal-guardian.md#run-the-full-chain).
+
+With the real board, point the AZ3166 at the broker's address on port 1883,
+or start the publisher with `--mqtt-host <broker address>` if the broker runs
+elsewhere. If the broker is not reachable, the publisher retries every second.
+
+As a container (Podman / Ankaios workload):
+
+```sh
+podman build -t vss-uprotocol-publisher -f vss-uprotocol-publisher/Containerfile vss-uprotocol-publisher
+podman run --rm --net=host vss-uprotocol-publisher --mqtt-host 192.168.1.10
 ```
 
 ### Check the output without the Guardian
@@ -74,26 +98,63 @@ vss-uprotocol-publisher/target/release/vss-listen -c vss-uprotocol-publisher/con
 ```
 
 `sent_ms` is the creation time from the uMessage id, `latency_ms` the time
-until it arrived. In the publisher itself, `RUST_LOG=info,vss_uprotocol_publisher=debug`
+until it arrived. In the publisher itself, `RUST_LOG=info,zenoh=warn,vss_uprotocol_publisher=debug`
 logs every published sample, and `reading dropped` warnings show MQTT messages
 that could not be mapped. If `vss-listen` shows nothing, see
 [If the monitor shows nothing](battery-thermal-guardian.md#if-the-monitor-shows-nothing)
 (Zenoh discovery). From the container image:
-`podman run --rm --net=host --entrypoint vss-listen vss-uprotocol-publisher`.
+`podman run --rm --net=host --entrypoint vss-listen vss-uprotocol-publisher -c /etc/vss-uprotocol-publisher/publisher.toml`.
 
-To run it together with the Guardian and replay a recorded MQTT log, see
-[Run the full chain](battery-thermal-guardian.md#run-the-full-chain).
+### Simulated source (vss-sim)
 
-With the real board, point the AZ3166 at the broker's address on port 1883,
-or start the publisher with `--mqtt-host <broker address>` if the broker runs
-elsewhere. If the broker is not reachable, the publisher retries every second.
-
-As a container (Podman / Ankaios workload):
+`vss-sim` replaces the board and the publisher: it publishes a temperature
+profile as `VssSample`s on the publisher's topic (same config file), with an
+optional fault injected between `--fault-start-s` (default 10) and
+`--fault-end-s` (25). It only sends VSS samples and knows nothing about the
+Guardian.
 
 ```sh
-podman build -t vss-uprotocol-publisher -f vss-uprotocol-publisher/Containerfile vss-uprotocol-publisher
-podman run --rm --net=host vss-uprotocol-publisher --mqtt-host 192.168.1.10
+vss-uprotocol-publisher/target/release/vss-sim stuck -c vss-uprotocol-publisher/config/publisher.toml \
+  --correlation-id run-001 > injection.jsonl
 ```
+
+| Scenario | Class | What vss-sim does | Guardian reaction (observed with `config/demo.toml`) |
+|---|---|---|---|
+| `nominal` | – | stable ~30 °C | MONITORING, no faults |
+| `overheat` | thermal | ramp to 72 °C, hold, cool down | WARNING → CRITICAL → MITIGATING (`REDUCE_POWER_MAX_COOLING`). demo.toml's 10 s mitigation timeout expires during the hold, so `OCCUPANT_EVACUATION_WARNING` follows; after cooling back to MONITORING, mitigations released |
+| `runaway` | thermal | ramp to 72 °C and keep rising | WARNING → CRITICAL → MITIGATING; every `mitigation_timeout_ms` back to CRITICAL with `OCCUPANT_EVACUATION_WARNING` re-asserted |
+| `stuck` | Signal | value frozen in the fault window | `TempSignalStuck` after `stuck_window_ms` (5 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the value changes again |
+| `spike` | Signal | every 4th sample +40 °C in the fault window | `TempSignalSpike`, spiked samples discarded, state unchanged; cleared after 5 good samples |
+| `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so `TempSourceConnectionLost` after 3 s → DEGRADED |
+| `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next sample |
+| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so `TempSourceConnectionLost` → DEGRADED. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
+| `duplicate` | Transport | every sample sent twice in the fault window | `TransportDuplicate`, duplicates discarded, state unchanged |
+| `reorder` | Transport | consecutive samples swapped in the fault window | `TransportOutOfOrder`, older sample discarded, state unchanged. Only some swapped pairs are detected, see [Current limits](#current-limits) |
+
+Times are from runs with the fault window at 4–12 s. Every fault clears
+after the window; DEGRADED returns to MONITORING.
+
+Other options: `--rate-hz` (2), `--duration-s` (90), `--zenoh-config`. Each
+sample carries an 8-bit `rolling_counter` like the board's.
+
+**Injection record**: stdout gets one JSON line per event, logs go to stderr:
+
+```json
+{"record":"run_start","at_ms":1791359100000,"scenario":"stuck","correlation_id":"run-001","topic":"//vehicle/8001/1/8001",...}
+{"record":"fault_start","at_ms":1791359110000,"scenario":"stuck","correlation_id":"run-001"}
+{"record":"fault_end","at_ms":1791359125000,"scenario":"stuck","correlation_id":"run-001"}
+{"record":"run_end","at_ms":1791359192200,"scenario":"stuck","correlation_id":"run-001"}
+```
+
+`at_ms` is wall-clock time like the Guardian's event `at_ms`, so detection
+latency = Guardian fault event `at_ms` − `fault_start` `at_ms`. The temperature
+profiles (`nominal`, `overheat`, `runaway`) have no fault window and only
+write `run_start` and `run_end`. From the container image:
+`podman run --rm --net=host --entrypoint vss-sim vss-uprotocol-publisher stuck -c /etc/vss-uprotocol-publisher/publisher.toml`.
+
+`vss-sim` is a development aid; it does not replace the fault campaign runner.
+To run it with the Guardian, see
+[Without the board or the publisher](battery-thermal-guardian.md#without-the-board-or-the-publisher).
 
 ## Input: MQTT
 
@@ -144,8 +205,11 @@ The publisher's address is part of the
 
 [`config/publisher.toml`](../vss-uprotocol-publisher/config/publisher.toml)
 lists every option with its default. `--mqtt-host`, `--zenoh-config` and
-`--correlation-id` override the file. Logging is controlled by `RUST_LOG`
-(`debug` shows every published sample) and goes to stderr.
+`--correlation-id` override the file. `vss-listen` and `vss-sim` read the same
+file (`[uprotocol]` for the topic, `[mapping] vss_path` for vss-sim), so they
+always use the publisher's topic. Logging is controlled by `RUST_LOG`
+(`info,zenoh=warn,vss_uprotocol_publisher=debug` shows every published sample) and goes
+to stderr.
 
 ## Development
 
@@ -162,7 +226,17 @@ cd vss-uprotocol-publisher && cargo test
 - [`tests/uprotocol.rs`](../vss-uprotocol-publisher/tests/uprotocol.rs): the
   published uMessage on up-rust's in-process `LocalTransport`.
 
+`vss-listen` and `vss-sim` (`src/bin/`) are test tools and have no tests of
+their own.
+
 ## Current limits
 
 - Readings that MQTT delivers back to back after a Wi-Fi hiccup become
   uMessages milliseconds apart and can trip the Guardian's spike check.
+- `vss-sim` injects one fault per run, in one window; the delay of the
+  `delay` scenario is fixed at 2 s.
+- `reorder`: vss-sim sends each swapped pair back to back. up-transport-zenoh
+  hands every received message to the listener in its own task, so two
+  messages that arrive within microseconds can reach the Guardian in either
+  order, and most swapped pairs arrive in the right order again. The fault is
+  detected, but not for every pair.

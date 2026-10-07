@@ -46,6 +46,10 @@
 //! - [`config`]: MQTT, mapping and uProtocol settings, loaded from TOML
 //! - [`mapping`]: MQTT payload to VSS sample (pure, no I/O)
 //! - [`publisher`]: VSS sample to uMessage on the uProtocol transport
+//!
+//! Test tools in `src/bin/`: `vss-listen` prints the uMessages on the
+//! publisher's topic; `vss-sim` publishes a simulated temperature profile
+//! with an optional injected fault on that topic, instead of the board.
 
 pub mod config;
 pub mod mapping;

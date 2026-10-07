@@ -28,8 +28,9 @@ RUN cargo build --release --locked --bins
 # ---- Runtime stage ----
 # Small Debian image with only the binaries and the default configuration.
 FROM docker.io/library/debian:bookworm-slim
-# vss-listen is a test tool, started from the same image with --entrypoint.
-COPY --from=build /src/target/release/vss-uprotocol-publisher /src/target/release/vss-listen /usr/local/bin/
+# vss-listen and vss-sim are test tools, started from the same image with
+# --entrypoint (e.g. --entrypoint vss-sim ... stuck --correlation-id run-001).
+COPY --from=build /src/target/release/vss-uprotocol-publisher /src/target/release/vss-listen /src/target/release/vss-sim /usr/local/bin/
 COPY config/publisher.toml /etc/vss-uprotocol-publisher/publisher.toml
 # Run as "nobody": the publisher needs no privileges.
 USER 65534:65534

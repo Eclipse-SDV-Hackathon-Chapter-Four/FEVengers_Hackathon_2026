@@ -15,15 +15,14 @@
 #   podman build -t battery-thermal-guardian -f Containerfile .
 #   podman run --rm --net=host battery-thermal-guardian
 #
-# With DFM reporting (src/dfm.rs): the DFM catalog is mounted and passed with
-# --dfm-catalog. fault-lib talks to the DFM over iceoryx2 shared memory, so the
-# container needs the same IPC options as the DFM container
-# (Docs/DFM_BRINGUP.md) and must run as the same user as the DFM:
-#   podman run --rm --net=host --ipc=host --user 0:0 \
-#     -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 \
-#     -v ../dfm-container/battery_guardian_catalog.json:/etc/guardian/battery_guardian_catalog.json:ro \
+# With DFM reporting (src/faults.rs, src/dfm.rs): the catalog directory is
+# mounted (the same one the DFM uses) and passed with --dfm-catalog. fault-lib
+# talks to the DFM over iceoryx2 shared memory, so the container needs the
+# same IPC options as the DFM container and must run as the same user:
+#   podman run --rm --net=host --ipc=host --pid=host --user 0:0 \
+#     -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 -v <catalog dir>:/catalogs:ro \
 #     battery-thermal-guardian --config /etc/guardian/guardian.toml \
-#     --dfm-catalog /etc/guardian/battery_guardian_catalog.json
+#     --dfm-catalog /catalogs/battery_guardian_catalog.json
 # On AutoSD (SELinux enforcing) also add --security-opt label=disable.
 
 # ---- Build stage ----
@@ -43,9 +42,9 @@ RUN cargo build --release --locked --bins
 # ---- Runtime stage ----
 # Small Debian image with only the binaries and the default configuration.
 FROM docker.io/library/debian:bookworm-slim
-# guardian = the service; vss-sim and guardian-monitor are test tools that
-# can be started from the same image with --entrypoint.
-COPY --from=build /src/target/release/guardian /src/target/release/vss-sim /src/target/release/guardian-monitor /usr/local/bin/
+# guardian = the service; guardian-monitor is a test tool that can be
+# started from the same image with --entrypoint.
+COPY --from=build /src/target/release/guardian /src/target/release/guardian-monitor /usr/local/bin/
 COPY config/guardian.toml /etc/guardian/guardian.toml
 # Run as "nobody"; override with --user when DFM reporting is used (see above).
 USER 65534:65534

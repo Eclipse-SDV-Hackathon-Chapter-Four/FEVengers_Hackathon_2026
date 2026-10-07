@@ -13,29 +13,33 @@
  * SPDX-License-Identifier: EPL-2.0 AND CC0-1.0
  ********************************************************************************/
 
-//! Minimal stand-in for the VSS uProtocol publisher: publishes a battery
-//! temperature profile on the Guardian's input topic, optionally with one
-//! deterministic fault injected in a time window. Meant for local testing of
-//! the Guardian, not as a replacement for the fault campaign runner.
+//! Stand-in for the board and the publisher: publishes a battery temperature
+//! profile on the publisher's uProtocol topic, optionally with one
+//! deterministic fault injected in a time window. Only sends VSS samples; it
+//! knows nothing about the Guardian.
 //!
-//! Where it sits: it replaces the left half of the real chain
-//! (AZ3166 -> Mosquitto -> vss-uprotocol-publisher) and talks to the Guardian
-//! directly over uProtocol/Zenoh, with the same `VssSample` payload.
+//! Where it sits: it replaces the real source chain
+//! (AZ3166 -> Mosquitto -> vss-uprotocol-publisher) and publishes the same
+//! `VssSample` payload on the same topic, using the publisher's config.
 //!
-//! Example: `vss-sim overheat -c config/demo.toml --correlation-id run-001`
+//! Injection record: stdout gets one JSON line per event (`run_start`,
+//! `fault_start`, `fault_end`, `run_end`) with the time and correlation id,
+//! so detection latency can be measured against the Guardian's events.
+//! Logs go to stderr.
+//!
+//! Example: `vss-sim stuck -c config/publisher.toml --correlation-id run-001 > injection.jsonl`
 
-use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
-use guardian::config::GuardianConfig;
-use guardian::contract::VssSample;
-use guardian::transport;
 use tracing::info;
 use up_rust::{
     LocalUriProvider, StaticUriProvider, UMessage, UMessageBuilder, UPayloadFormat, UTransport,
     UUri,
 };
+use vss_publisher::config::PublisherConfig;
+use vss_publisher::mapping::VssSample;
+use vss_publisher::publisher::zenoh_transport;
 
 /// What to simulate. Temperature profiles change the value over time; fault
 /// scenarios use the nominal ~30 C profile and break it between
@@ -64,13 +68,32 @@ enum Scenario {
     Reorder,
 }
 
+impl Scenario {
+    /// Name as on the command line, e.g. "out-of-range".
+    fn name(self) -> String {
+        self.to_possible_value()
+            .map(|v| v.get_name().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Fault scenarios break the signal in the fault window; the temperature
+    /// profiles (nominal, overheat, runaway) do not.
+    fn injects_fault(self) -> bool {
+        !matches!(
+            self,
+            Scenario::Nominal | Scenario::Overheat | Scenario::Runaway
+        )
+    }
+}
+
 #[derive(Parser)]
 struct Args {
     #[arg(value_enum)]
     scenario: Scenario,
-    /// Guardian configuration (TOML) providing authority, input topic and VSS path.
+    /// Publisher configuration (TOML) providing authority, topic and VSS path.
     #[arg(short, long)]
     config: Option<std::path::PathBuf>,
+    /// Zenoh configuration (JSON5), overrides `uprotocol.zenoh_config`.
     #[arg(long)]
     zenoh_config: Option<String>,
     /// Samples per second.
@@ -92,32 +115,43 @@ const DELAY_MS: u64 = 2000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    transport::init_logging();
+    // Logs on stderr (default info, Zenoh only warnings); stdout is for the
+    // injection record.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,zenoh=warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let args = Args::parse();
-    // Same config file as the Guardian, so both agree on topic and VSS path.
+    // Same config file as the publisher, so both use the same topic and VSS path.
     let cfg = match &args.config {
-        Some(path) => GuardianConfig::load(path)?,
-        None => GuardianConfig::default(),
+        Some(path) => PublisherConfig::load(path)?,
+        None => PublisherConfig::default(),
     };
     let up = &cfg.uprotocol;
+    let vss_path = &cfg.mapping.vss_path;
 
-    // The Guardian's input filter (e.g. //*/8001/1/8001) tells us which topic
-    // to publish on: same entity, version and resource, but our own authority
-    // instead of the wildcard.
-    let filter = UUri::from_str(&up.input_topic)?;
-    if filter.has_wildcard_entity_type() || filter.has_wildcard_resource_id() {
-        return Err("input_topic must name a concrete entity and resource".into());
-    }
-    let topic = StaticUriProvider::new(
-        up.authority.clone(),
-        filter.ue_id,
-        filter.uentity_major_version(),
-    )
-    .get_resource_uri(filter.resource_id());
+    // The publisher's topic, e.g. //vehicle/8001/1/8001.
+    let topic = StaticUriProvider::new(up.authority.clone(), up.entity_id, up.entity_version)
+        .get_resource_uri(up.resource_id);
 
     let zenoh_config = args.zenoh_config.as_deref().or(up.zenoh_config.as_deref());
-    let transport = transport::zenoh_transport(&up.authority, zenoh_config).await?;
+    let transport = zenoh_transport(&up.authority, zenoh_config).await?;
     info!(topic = %topic.to_uri(false), scenario = ?args.scenario, "publishing");
+    emit(
+        "run_start",
+        &args,
+        serde_json::json!({
+            "topic": topic.to_uri(false),
+            "vss_path": vss_path,
+            "rate_hz": args.rate_hz,
+            "duration_s": args.duration_s,
+            "fault_start_s": args.fault_start_s,
+            "fault_end_s": args.fault_end_s,
+        }),
+    );
 
     let period = Duration::from_secs_f64(1.0 / args.rate_hz);
     let mut interval = tokio::time::interval(period);
@@ -127,6 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut frozen: Option<f64> = None;
     // Reorder scenario: a message held back to be sent after the next one.
     let mut held_back: Option<UMessage> = None;
+    // Whether the fault window is open (for fault_start / fault_end records).
+    let mut fault_active = false;
 
     // One iteration per sample period; `t` = seconds since start.
     for i in 0.. {
@@ -136,6 +172,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             break;
         }
         let in_fault = t >= args.fault_start_s && t < args.fault_end_s;
+        if args.scenario.injects_fault() && in_fault != fault_active {
+            fault_active = in_fault;
+            let record = if in_fault { "fault_start" } else { "fault_end" };
+            emit(record, &args, serde_json::json!({}));
+        }
         let mut value = base_temperature(args.scenario, t);
 
         // Faults that change the *value* (or suppress the sample entirely).
@@ -151,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         counter = (counter + 1) % 256;
         let sample = VssSample {
-            path: up.vss_path.clone(),
+            path: vss_path.clone(),
             value: (value * 10.0).round() / 10.0, // 0.1 C resolution, like a real sensor
             rolling_counter: counter,
             correlation_id: args.correlation_id.clone(),
@@ -197,9 +238,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             send(&*transport, msg).await;
         }
     }
+    // Run ended inside the fault window: the fault ends with it.
+    if fault_active {
+        emit("fault_end", &args, serde_json::json!({}));
+    }
     // Let delayed samples go out before the session closes.
     tokio::time::sleep(Duration::from_millis(DELAY_MS + 200)).await;
+    emit("run_end", &args, serde_json::json!({}));
     Ok(())
+}
+
+/// Writes one injection record as a JSON line on stdout.
+// `at_ms` is wall-clock time like the Guardian's event `at_ms`, so
+// detection latency = Guardian fault event at_ms - fault_start at_ms.
+fn emit(record: &str, args: &Args, mut fields: serde_json::Value) {
+    let at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    fields["record"] = record.into();
+    fields["at_ms"] = at_ms.into();
+    fields["scenario"] = args.scenario.name().into();
+    fields["correlation_id"] = args.correlation_id.clone().into();
+    println!("{fields}");
 }
 
 /// Temperature at time `t` (s) for the scenario, as (time, value) waypoints

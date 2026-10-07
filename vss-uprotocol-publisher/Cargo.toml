@@ -31,6 +31,12 @@ path = "src/main.rs"
 name = "vss-listen"
 path = "src/bin/vss_listen.rs"
 
+# Test tool: publishes a temperature profile with an optional injected fault
+# on the publisher's topic, instead of the board and the publisher.
+[[bin]]
+name = "vss-sim"
+path = "src/bin/vss_sim.rs"
+
 [dependencies]
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }

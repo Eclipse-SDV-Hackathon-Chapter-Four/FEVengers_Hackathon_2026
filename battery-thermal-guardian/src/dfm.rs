@@ -16,114 +16,74 @@
 //! DFM reporter: forwards catalog faults to the Eclipse OpenSOVD Diagnostic
 //! Fault Manager (flow step 6 in `lib.rs`).
 //!
-//! The Guardian publishes every fault on its uProtocol fault topic. Faults
-//! with a DFM catalog id (`FaultKind::catalog_id`) are additionally reported
-//! to the DFM with fault-lib, which sends them over iceoryx2 shared memory.
-//! The DFM keeps the diagnostic state (DTC status, occurrence counter,
-//! environment data) and OpenSOVD exposes it.
+//! The DFM side (fault-lib reporters) is in faults.rs. This file connects it
+//! to the Guardian:
 //!
-//! | Guardian fault event | DFM record (`LifecycleStage`) |
-//! |----------------------|-------------------------------|
-//! | RAISED               | Failed                        |
-//! | CLEARED              | Passed                        |
-//!
-//! The record's environment data carries the event details (state, trigger
-//! sample, correlation id), so a DFM record can be traced back to the test
-//! run and the exact input message.
-//!
-//! fault-lib is synchronous, and connecting can block for seconds (it waits
-//! for the DFM to confirm the catalog hash). So all of it runs on its own
-//! thread; the service loop only puts reports into a channel and never waits
-//! for the DFM. While the DFM is not reachable, the thread retries every
-//! `retry_period_ms` and keeps the latest report per fault. Once connected it
-//! sends those, so the DFM catches up with the current fault state.
+//! - maps the Guardian's `FaultKind` to faults.rs' `GuardianFault`; the four
+//!   catalog faults have one, the transport faults are not in the catalog;
+//! - turns fault events into `GuardianFaults::set`: RAISED = active
+//!   (`Failed`), CLEARED = not active (`Passed`);
+//! - runs faults.rs on its own thread. Connecting blocks until the DFM
+//!   answers the catalog handshake and fails if the DFM is not running, but
+//!   the Guardian must keep working without the DFM. So the service loop only
+//!   puts reports into a channel; the thread retries every `retry_period_ms`
+//!   and keeps the latest state of each fault until it is connected, then
+//!   reports those so the DFM catches up with the current state.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fault_common::fault::{FaultId, LifecyclePhase, LifecycleStage};
-use fault_common::types::{MetadataVec, ShortString};
-use fault_common::{to_static_short_string, SourceId};
-use fault_lib::catalog::{FaultCatalog, FaultCatalogBuilder};
-use fault_lib::reporter::{Reporter, ReporterApi, ReporterConfig};
-use fault_lib::FaultApi;
-use serde::Serialize;
+use fault_lib::catalog::FaultCatalogBuilder;
 use tracing::{debug, info, warn};
 
 use crate::config::DfmConfig;
 use crate::contract::{FaultEvent, FaultKind, FaultStatus};
+use crate::faults::{GuardianFault, GuardianFaults};
 
-/// Capacity of a fault-lib `ShortString` in bytes (env data keys and values).
-const SHORT_STRING_LEN: usize = 64;
-
-/// One DFM record to send, derived from a Guardian fault event.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DfmReport {
-    pub kind: FaultKind,
-    /// Catalog id, e.g. "btg.temp.stuck".
-    pub fault_id: &'static str,
-    pub stage: LifecycleStage,
-    /// Environment data stored with the record (at most 8 pairs).
-    pub env: Vec<(&'static str, String)>,
+/// The faults.rs fault for a Guardian fault, `None` if it is not in the DFM catalog.
+pub fn dfm_fault(kind: FaultKind) -> Option<GuardianFault> {
+    match kind {
+        FaultKind::TempSourceConnectionLost => Some(GuardianFault::ConnectionLost),
+        FaultKind::TempOutOfRange => Some(GuardianFault::OutOfRange),
+        FaultKind::TempSignalStuck => Some(GuardianFault::Stuck),
+        FaultKind::TempSignalSpike => Some(GuardianFault::Spike),
+        FaultKind::TransportDelay
+        | FaultKind::TransportDuplicate
+        | FaultKind::TransportOutOfOrder
+        | FaultKind::PayloadInvalid => None,
+    }
 }
 
-/// The DFM record for a fault event, or `None` if the fault is not in the
-/// DFM catalog (Guardian-internal fault).
-pub fn to_report(event: &FaultEvent) -> Option<DfmReport> {
-    let fault_id = event.fault.catalog_id()?;
-    let stage = match event.status {
-        FaultStatus::Raised => LifecycleStage::Failed,
-        FaultStatus::Cleared => LifecycleStage::Passed,
-    };
-    // fault-lib allows 8 pairs; this uses all of them when a trigger exists.
-    let mut env = vec![
-        ("detail", event.detail.clone()),
-        ("guardian_state", json_name(&event.state)),
-        ("event_seq", event.seq.to_string()),
-        ("at_ms", event.at_ms.to_string()),
-    ];
-    if let Some(t) = &event.trigger {
-        env.push(("rolling_counter", t.rolling_counter.to_string()));
-        env.push(("sample_value", t.value.to_string()));
-        if let Some(id) = &t.message_id {
-            env.push(("message_id", id.clone()));
-        }
-        if let Some(id) = &t.correlation_id {
-            env.push(("correlation_id", id.clone()));
-        }
-    }
-    Some(DfmReport {
-        kind: event.fault,
-        fault_id,
-        stage,
-        env,
-    })
+/// What to report for a fault event: the fault and whether it is now active.
+pub fn to_report(event: &FaultEvent) -> Option<(GuardianFault, bool)> {
+    let fault = dfm_fault(event.fault)?;
+    Some((fault, event.status == FaultStatus::Raised))
 }
 
 /// Handle used by the service loop. Reporting never blocks.
 pub struct DfmReporter {
-    tx: Sender<DfmReport>,
+    tx: Sender<(GuardianFault, bool)>,
 }
 
 impl DfmReporter {
     /// Starts the reporter thread. `Ok(None)` if no catalog is configured
     /// (DFM reporting off); an error if the catalog cannot be loaded.
-    pub fn start(cfg: &DfmConfig, authority: &str) -> Result<Option<Self>, String> {
-        let Some(path) = &cfg.catalog else {
+    pub fn start(cfg: &DfmConfig) -> Result<Option<Self>, String> {
+        let Some(catalog) = cfg.catalog.clone() else {
             return Ok(None);
         };
-        // Load the catalog now, so a wrong path or broken file stops the
+        // Load the catalog once now, so a wrong path or broken file stops the
         // Guardian at startup instead of only showing up in the DFM thread.
-        let json = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read DFM catalog {}: {e}", path.display()))?;
-        build_catalog(&json).map_err(|e| format!("DFM catalog {}: {e}", path.display()))?;
+        FaultCatalogBuilder::new()
+            .json_file(catalog.clone())
+            .and_then(FaultCatalogBuilder::try_build)
+            .map_err(|e| format!("cannot load DFM catalog {}: {e:?}", catalog.display()))?;
 
         let worker = Worker {
-            catalog_json: json,
-            source: source_id(authority)?,
+            catalog: catalog.clone(),
             retry_period: Duration::from_millis(cfg.retry_period_ms),
         };
         let (tx, rx) = mpsc::channel();
@@ -131,42 +91,41 @@ impl DfmReporter {
             .name("dfm-reporter".into())
             .spawn(move || worker.run(rx))
             .map_err(|e| format!("cannot start DFM reporter thread: {e}"))?;
-        info!(catalog = %Path::new(path).display(), "DFM reporting enabled");
+        info!(catalog = %catalog.display(), "DFM reporting enabled");
         Ok(Some(Self { tx }))
     }
 
     /// Queues the fault event for the DFM if it is a catalog fault.
     pub fn report(&self, event: &FaultEvent) {
         if let Some(report) = to_report(event) {
-            // Only fails if the reporter thread is gone; it logged why.
+            // Only fails if the reporter thread is gone.
             let _ = self.tx.send(report);
         }
     }
 }
 
-/// The reporter thread: connects to the DFM and sends the reports.
+/// The reporter thread: connects to the DFM and reports the fault states.
 struct Worker {
-    catalog_json: String,
-    source: SourceId,
+    catalog: PathBuf,
     retry_period: Duration,
 }
 
 impl Worker {
     /// Runs until the `DfmReporter` (the sending side) is dropped.
-    fn run(self, rx: Receiver<DfmReport>) {
-        let mut connection: Option<Connection> = None;
-        // Latest report per fault while not connected.
-        let mut pending: BTreeMap<FaultKind, DfmReport> = BTreeMap::new();
+    fn run(self, rx: Receiver<(GuardianFault, bool)>) {
+        let mut faults: Option<GuardianFaults> = None;
+        // Latest state per fault (by catalog id) while not connected.
+        let mut pending: BTreeMap<&'static str, (GuardianFault, bool)> = BTreeMap::new();
         let mut next_attempt = Instant::now();
         loop {
-            if connection.is_none() && Instant::now() >= next_attempt {
-                match self.connect() {
-                    Ok(mut c) => {
-                        info!(path = %c.path, "connected to DFM");
-                        for report in std::mem::take(&mut pending).into_values() {
-                            c.publish(report);
+            if faults.is_none() && Instant::now() >= next_attempt {
+                match GuardianFaults::new(self.catalog.clone()) {
+                    Ok(mut f) => {
+                        info!("connected to DFM");
+                        for (fault, active) in std::mem::take(&mut pending).into_values() {
+                            f.set(fault, active);
                         }
-                        connection = Some(c);
+                        faults = Some(f);
                     }
                     Err(e) => {
                         warn!("DFM not reachable, retry in {:?}: {e}", self.retry_period);
@@ -176,185 +135,63 @@ impl Worker {
             }
             // Connected: wait for the next report. Not connected: wait at
             // most until the next connection attempt.
-            let received = match &connection {
+            let received = match &faults {
                 Some(_) => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 None => rx.recv_timeout(next_attempt.saturating_duration_since(Instant::now())),
             };
             match received {
-                Ok(report) => match &mut connection {
-                    Some(c) => c.publish(report),
+                Ok((fault, active)) => match &mut faults {
+                    // Reports only if the state changed (faults.rs).
+                    Some(f) => f.set(fault, active),
                     None => {
-                        pending.insert(report.kind, report);
+                        pending.insert(fault.catalog_id(), (fault, active));
                     }
                 },
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        // Dropping the connection (and with it FaultApi) shuts fault-lib down.
+        // Dropping GuardianFaults disconnects from the DFM.
         debug!("DFM reporter stopped");
     }
-
-    /// Initializes fault-lib and creates one reporter per catalog fault.
-    // FaultApi::try_new checks the catalog hash with the DFM: it fails if the
-    // DFM is not running or loaded a different version of the catalog.
-    fn connect(&self) -> Result<Connection, String> {
-        let catalog = build_catalog(&self.catalog_json)?;
-        let api = FaultApi::try_new(catalog).map_err(|e| e.to_string())?;
-        // SOVD entity path of our faults = the catalog id ("battery").
-        let path = FaultApi::get_fault_catalog().id.to_string();
-        let config = ReporterConfig {
-            source: self.source.clone(),
-            lifecycle_phase: LifecyclePhase::Running,
-            default_env_data: MetadataVec::new(),
-        };
-        let mut reporters = BTreeMap::new();
-        for kind in FaultKind::ALL {
-            let Some(id) = kind.catalog_id() else {
-                continue;
-            };
-            let id = FaultId::Text(short_string(id)?);
-            let reporter = Reporter::new(&id, config.clone()).map_err(|e| e.to_string())?;
-            reporters.insert(kind, reporter);
-        }
-        Ok(Connection {
-            _api: api,
-            path,
-            reporters,
-        })
-    }
-}
-
-/// An initialized fault-lib with its reporters.
-struct Connection {
-    /// Keeps fault-lib alive; reporters stop working when it is dropped.
-    _api: FaultApi,
-    path: String,
-    reporters: BTreeMap<FaultKind, Reporter>,
-}
-
-impl Connection {
-    fn publish(&mut self, report: DfmReport) {
-        let Some(reporter) = self.reporters.get_mut(&report.kind) else {
-            return warn!(fault = report.fault_id, "fault not in DFM catalog");
-        };
-        let mut record = reporter.create_record(report.stage);
-        record.env_data = env_data(&report.env);
-        // publish only queues the record; fault-lib sends it on its own thread
-        // and retries if the DFM is temporarily gone.
-        match reporter.publish(&self.path, record) {
-            Ok(()) => debug!(fault = report.fault_id, stage = ?report.stage, "reported to DFM"),
-            Err(e) => warn!(fault = report.fault_id, "DFM report failed: {e}"),
-        }
-    }
-}
-
-fn build_catalog(json: &str) -> Result<FaultCatalog, String> {
-    FaultCatalogBuilder::new()
-        .json_string(json)
-        .and_then(FaultCatalogBuilder::try_build)
-        .map_err(|e| format!("{e:?}"))
-}
-
-/// Identity of the Guardian as the reporting component.
-fn source_id(authority: &str) -> Result<SourceId, String> {
-    Ok(SourceId {
-        entity: short_string("BatteryThermalGuardian")?,
-        ecu: Some(short_string(authority)?),
-        domain: Some(short_string("Powertrain")?),
-        sw_component: Some(short_string("battery-thermal-guardian")?),
-        instance: Some(short_string("0")?),
-    })
-}
-
-/// Env data pairs as fault-lib strings; values longer than 64 bytes are cut.
-fn env_data(pairs: &[(&'static str, String)]) -> MetadataVec {
-    let pairs: Vec<(ShortString, ShortString)> = pairs
-        .iter()
-        .filter_map(|(k, v)| Some((short_string(k).ok()?, short_string(truncate(v)).ok()?)))
-        .collect();
-    MetadataVec::try_from(&pairs[..]).unwrap_or_else(|_| MetadataVec::new())
-}
-
-fn short_string(s: &str) -> Result<ShortString, String> {
-    to_static_short_string(s).map_err(|e| format!("{s:?}: {e:?}"))
-}
-
-/// Longest prefix of `s` that fits into a `ShortString`, cut at a character boundary.
-fn truncate(s: &str) -> &str {
-    let mut end = s.len().min(SHORT_STRING_LEN);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-/// Name of an enum value as it appears in JSON (e.g. "DEGRADED").
-fn json_name<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{FaultClass, GuardianState, SampleRef};
+    use crate::contract::{FaultClass, GuardianState};
 
-    fn event(fault: FaultKind, status: FaultStatus, trigger: Option<SampleRef>) -> FaultEvent {
+    fn event(fault: FaultKind, status: FaultStatus) -> FaultEvent {
         FaultEvent {
-            seq: 7,
+            seq: 1,
             fault,
             catalog_id: fault.catalog_id().map(str::to_string),
             class: FaultClass::Signal,
             status,
-            detail: "value 21.5 unchanged for 30000 ms".into(),
-            state: GuardianState::Degraded,
-            at_ms: 1_000,
-            trigger,
+            detail: String::new(),
+            state: GuardianState::Monitoring,
+            at_ms: 0,
+            trigger: None,
+        }
+    }
+
+    // Every Guardian fault with a catalog id maps to the faults.rs fault with
+    // the same id; faults without one are not reported.
+    #[test]
+    fn fault_kinds_map_to_catalog_faults() {
+        for kind in FaultKind::ALL {
+            let dfm_id = dfm_fault(kind).map(GuardianFault::catalog_id);
+            assert_eq!(dfm_id, kind.catalog_id(), "{kind:?}");
         }
     }
 
     #[test]
-    fn raised_is_failed_and_cleared_is_passed() {
-        let raised = to_report(&event(FaultKind::TempSignalStuck, FaultStatus::Raised, None));
-        let cleared = to_report(&event(FaultKind::TempSignalStuck, FaultStatus::Cleared, None));
-        assert_eq!(raised.unwrap().stage, LifecycleStage::Failed);
-        assert_eq!(cleared.unwrap().stage, LifecycleStage::Passed);
-    }
-
-    #[test]
-    fn faults_without_catalog_id_are_not_reported() {
-        let e = event(FaultKind::TransportDuplicate, FaultStatus::Raised, None);
-        assert_eq!(to_report(&e), None);
-    }
-
-    #[test]
-    fn env_data_carries_event_and_trigger() {
-        let trigger = SampleRef {
-            rolling_counter: 42,
-            sent_ms: 900,
-            value: 21.5,
-            message_id: Some("01890a5d-ac96-774b-bcce-b302099a8057".into()),
-            correlation_id: Some("run-001".into()),
-        };
-        let r = to_report(&event(FaultKind::TempSignalStuck, FaultStatus::Raised, Some(trigger)))
-            .unwrap();
-        assert_eq!(r.fault_id, "btg.temp.stuck");
-        let get = |k: &str| r.env.iter().find(|(key, _)| *key == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("guardian_state"), Some("DEGRADED"));
-        assert_eq!(get("event_seq"), Some("7"));
-        assert_eq!(get("rolling_counter"), Some("42"));
-        assert_eq!(get("correlation_id"), Some("run-001"));
-        // All pairs fit into one fault-lib record.
-        assert_eq!(env_data(&r.env).len(), r.env.len());
-    }
-
-    #[test]
-    fn long_values_are_cut_at_a_character_boundary() {
-        let s = format!("{}°C", "x".repeat(63)); // '°' spans bytes 63..65
-        assert_eq!(truncate(&s), "x".repeat(63));
-        assert_eq!(truncate("short"), "short");
+    fn raised_is_active_and_cleared_is_not() {
+        let raised = event(FaultKind::TempSignalStuck, FaultStatus::Raised);
+        let cleared = event(FaultKind::TempSignalStuck, FaultStatus::Cleared);
+        assert_eq!(to_report(&raised), Some((GuardianFault::Stuck, true)));
+        assert_eq!(to_report(&cleared), Some((GuardianFault::Stuck, false)));
+        let transport = event(FaultKind::TransportDuplicate, FaultStatus::Raised);
+        assert_eq!(to_report(&transport), None);
     }
 }
