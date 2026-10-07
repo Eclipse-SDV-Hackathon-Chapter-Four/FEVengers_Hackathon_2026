@@ -125,10 +125,10 @@ Connection settings, shared by `setup-autosd.sh` and `deploy-to-autosd.sh`:
 ## 6. Deploy
 
 ```bash
-./deploy/deploy-to-autosd.sh              # load the images, apply the manifest
-./deploy/deploy-to-autosd.sh --no-images  # only prepare the target and (re)apply the manifest
-./deploy/deploy-to-autosd.sh --persist    # also survive a reboot
-./deploy/deploy-to-autosd.sh status       # show the Ankaios workloads
+./deploy/deploy-to-autosd.sh               # load the images, start the workloads, keep them across reboots
+./deploy/deploy-to-autosd.sh --no-build    # same, without loading the images again (they are already on the target)
+./deploy/deploy-to-autosd.sh --no-persist  # start the workloads for this boot only
+./deploy/deploy-to-autosd.sh status        # show the Ankaios workloads
 ```
 
 What it does, in order:
@@ -140,7 +140,14 @@ What it does, in order:
 | Restart workloads | Deletes the workloads that use our images, clears stale iceoryx2 files, applies the manifest. Other workloads (the MQTT broker) keep running |
 | Wait | Up to 60 s until every workload is `Running(Ok)`; fails otherwise |
 
-Without `--persist` the workloads exist only in the Ankaios server's memory; after a reboot rerun the script. With `--persist` the manifest becomes the Ankaios startup manifest (`/var/lib/ankaios/state.yaml`, replacing the one there), so the server starts the workloads by itself at boot.
+The deployment is persistent by default, so the workloads start by themselves at every boot:
+
+| What is made persistent | How |
+|---|---|
+| The workloads | The manifest replaces the Ankaios startup manifest on the target (`/var/lib/ankaios/state.yaml`) |
+| `/tmp/iceoryx2` | A drop-in for the `ank-agent` user unit recreates it at boot (`/tmp` is a tmpfs) |
+
+With `--no-persist` the workloads exist only in the Ankaios server's memory: after a reboot only what the previous startup manifest lists comes back.
 
 ---
 
@@ -155,7 +162,7 @@ Without `--persist` the workloads exist only in the Ankaios server's memory; aft
 | `build-images.sh` with Docker, or on an ARM host | Not tested |
 | `setup-autosd.sh --check`, `deploy-to-autosd.sh status` | Run against the QEMU image |
 | `setup-autosd.sh`, install path | Not run. The install steps are the ones recorded for our QEMU image, where they worked by hand |
-| `deploy-to-autosd.sh` (without `--persist`) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
-| `deploy-to-autosd.sh --persist` | Not run yet |
+| `deploy-to-autosd.sh --no-persist` (the default at that time) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
+| `deploy-to-autosd.sh --no-build`, persistent (the default now), followed by a restart of the image | Run: all five workloads come back `Running(Ok)` on their own, `/tmp/iceoryx2` is recreated, the SOVD interface answers, no SELinux denials |
 | Data from the board through to the Guardian | Not seen yet: without board data the Guardian is `DEGRADED` (`TempSourceConnectionLost`), as designed |
 | `ankaios-manifest.yaml` | Applied by the deploy above |

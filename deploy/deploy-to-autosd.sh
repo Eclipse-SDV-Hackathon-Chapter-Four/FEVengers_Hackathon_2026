@@ -3,10 +3,13 @@
 #
 # deploy-to-autosd.sh - load the images into a running AutoSD system and start them with Ankaios.
 #
-#   ./deploy/deploy-to-autosd.sh              load the images, apply the manifest
-#   ./deploy/deploy-to-autosd.sh --no-images  only prepare the target and (re)apply the manifest
-#   ./deploy/deploy-to-autosd.sh --persist    also make the deployment survive a reboot
-#   ./deploy/deploy-to-autosd.sh status       show the Ankaios workloads on the target
+#   ./deploy/deploy-to-autosd.sh               load the images, start the workloads, keep them across reboots
+#   ./deploy/deploy-to-autosd.sh --no-build    same, without loading the images again (they are already on the target)
+#   ./deploy/deploy-to-autosd.sh --no-persist  start the workloads for this boot only
+#   ./deploy/deploy-to-autosd.sh status        show the Ankaios workloads on the target
+#
+# The deployment is persistent: the manifest becomes the Ankaios startup
+# manifest on the target, so the workloads start by themselves at every boot.
 #
 # Run ./deploy/build-images.sh first. Only the localhost/* images named in the
 # manifest are loaded; workloads that use them are restarted, all others
@@ -33,7 +36,7 @@ MANIFEST="${MANIFEST:-$REPO/deploy/ankaios-manifest.yaml}"
 # Fault catalogs on the target (mounted into the dfm workload).
 T_CATALOGS=/var/lib/fevengers/catalogs
 
-usage() { sed -n '4,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------- manifest
 # Prints "workload image" for every workload of the manifest.
@@ -136,12 +139,13 @@ wait_running() {
 
 # ---------------------------------------------------------------- main
 LOAD=1
-PERSIST=0
+PERSIST=1
 for arg in "$@"; do
   case "$arg" in
     status)      preflight; show_status; exit 0 ;;
-    --no-images) LOAD=0 ;;
-    --persist)   PERSIST=1 ;;
+    --no-build)  LOAD=0 ;;
+    --no-persist) PERSIST=0 ;;
+    --persist)    PERSIST=1 ;;   # the default; kept for older instructions
     -h|--help)   usage; exit 0 ;;
     *)           fail "unknown argument: $arg (try --help)" ;;
   esac
@@ -154,4 +158,8 @@ apply_manifest
 [ "$PERSIST" -eq 0 ] || persist
 wait_running
 log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/components/battery/faults"
-[ "$PERSIST" -eq 1 ] || log "not persistent: after a reboot rerun this script, or use --persist"
+if [ "$PERSIST" -eq 1 ]; then
+  log "persistent: the workloads start by themselves at every boot"
+else
+  log "not persistent: after a reboot only the previous startup manifest is started"
+fi

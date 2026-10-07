@@ -115,8 +115,10 @@ The firmware connects once and does not reconnect: after restarting AutoSD or th
 ```bash
 ./deploy/setup-autosd.sh       # once: install Ankaios in the image
 ./deploy/build-images.sh       # build the service images
-./deploy/deploy-to-autosd.sh   # load them and start the workloads
+./deploy/deploy-to-autosd.sh   # load them, start the workloads, keep them across reboots
 ```
+
+After that the five workloads start by themselves every time the image boots. When only the configuration changed and the images are already in AutoSD, `./deploy/deploy-to-autosd.sh --no-build` skips loading them again.
 
 Details: [Docs/BUILD_IMAGES.md](../Docs/BUILD_IMAGES.md).
 

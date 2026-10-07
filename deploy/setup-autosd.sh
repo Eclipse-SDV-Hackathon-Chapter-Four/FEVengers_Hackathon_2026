@@ -73,7 +73,7 @@ rm -f "$archive" "$archive.sha512sum.txt"
 
 mkdir -p "$T_UNIT_DIR" "$(dirname "$T_STARTUP_MANIFEST")"
 # Startup manifest: what the server starts on its own after a reboot.
-# Starts empty of our services; deploy-to-autosd.sh --persist fills it.
+# Starts with the broker only; deploy-to-autosd.sh replaces it with the full manifest.
 if [ ! -f "$T_STARTUP_MANIFEST" ]; then
   cat > "$T_STARTUP_MANIFEST" <<EOF
 apiVersion: v1
