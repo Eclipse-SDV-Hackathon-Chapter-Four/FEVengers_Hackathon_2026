@@ -27,7 +27,7 @@ Code: [`battery-thermal-guardian/`](../battery-thermal-guardian/)
 ```mermaid
 flowchart LR
   AZ[AZ3166 / ThreadX] -->|MQTT over Wi-Fi| MQ[Mosquitto]
-  MQ -->|az3166/telemetry| P[VSS uProtocol Publisher]
+  MQ -->|FEVengers_MQTT/telemetry| P[VSS uProtocol Publisher]
   P -->|uMessage<br/>//vehicle/8001/1/8001| Z[(uTransport<br/>Zenoh)]
   Z --> G[Battery Thermal Guardian]
   G -->|heartbeat · state · fault · mitigation<br/>//vehicle/8002/1/8001…8004| Z2[(uTransport<br/>Zenoh)]
@@ -49,9 +49,9 @@ The four faults of the DFM catalog
 
 | Fault | DFM catalog id | Class | Meaning | To DFM |
 |---|---|---|---|---|
-| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No accepted temperature sample within the timeout (board, Wi-Fi or MQTT link lost) | yes |
+| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No data: no message at all within the timeout (board, Wi-Fi or MQTT link lost) | yes |
 | `TempOutOfRange` | `btg.temp.out_of_range` | Signal | Temperature outside the physically plausible range | yes |
-| `TempSignalStuck` | `btg.temp.stuck` | Signal | Temperature value frozen for longer than allowed | yes |
+| `TempSignalStuck` | `btg.temp.stuck` | Signal | Data arrives, but the device's rolling counter does not increase (it repeats its last reading) | yes |
 | `TempSignalSpike` | `btg.temp.spike` | Signal | Implausible jump between samples, not confirmed by the next one | yes |
 | `TransportDelay` | – | Transport | Sample arrived later than the allowed end-to-end latency | no |
 | `TransportDuplicate` | – | Transport | Same rolling counter as the previous sample | no |
@@ -112,7 +112,7 @@ sent at one message per second:
 
 ```sh
 while IFS= read -r line; do echo "$line"; sleep 1; done < mqtt_log.txt \
-  | docker exec -i mosquitto mosquitto_pub -t az3166/telemetry -l
+  | docker exec -i mosquitto mosquitto_pub -t FEVengers_MQTT/telemetry -l
 ```
 
 A log taken with `mosquitto_sub -v` has the topic in front of each message;
@@ -140,8 +140,8 @@ vss-uprotocol-publisher/target/release/vss-sim overheat -c vss-uprotocol-publish
   --correlation-id run-001 > injection.jsonl
 ```
 
-`config/demo.toml` shortens the Guardian's stuck window and mitigation timeout
-so each scenario shows its effect within about a minute. `injection.jsonl`
+`config/demo.toml` shortens the Guardian's mitigation timeout so each scenario
+shows its effect within about a minute. `injection.jsonl`
 records when the fault was injected; together with the Guardian's events it
 gives the detection latency.
 
@@ -159,25 +159,22 @@ the full command is at the top of the
 ### If the monitor shows nothing
 
 The programs find each other through Zenoh multicast scouting, which VPNs,
-corporate networks, Wi-Fi or containers without `--net=host` can block.
-Connect them through a fixed address instead, with the two files in
-[`config/`](../config/) at the repository root:
+corporate networks or WSL2 can block. Connect them through a fixed address
+instead. Create `zenoh-listen.json5`:
 
-| File | For | What it does |
-|---|---|---|
-| [`zenoh-listen.json5`](../config/zenoh-listen.json5) | Guardian | listens on `tcp/127.0.0.1:7447`, multicast off |
-| [`zenoh-connect.json5`](../config/zenoh-connect.json5) | everything else | connects to `tcp/127.0.0.1:7447`, multicast off |
+```json5
+{ mode: "peer", listen: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
+```
 
-Start the Guardian first with `--zenoh-config config/zenoh-listen.json5`,
-then the monitor, the publisher, `vss-sim` and `vss-listen` with
-`--zenoh-config config/zenoh-connect.json5`. The connecting programs also
-reach each other through the Guardian (e.g. `vss-listen` sees `vss-sim`).
-In containers, mount the folder: `-v $PWD/config:/etc/zenoh:ro` and pass
-`--zenoh-config /etc/zenoh/zenoh-listen.json5` (or `zenoh-connect.json5`).
+and `zenoh-connect.json5`:
 
-`127.0.0.1` works as long as all programs run on the same machine, e.g. all
-containers in the AutoSD VM with `--net=host`. For programs on other machines,
-see the comments in the two files.
+```json5
+{ mode: "peer", connect: { endpoints: ["tcp/127.0.0.1:7447"] }, scouting: { multicast: { enabled: false } } }
+```
+
+Start the Guardian first with `--zenoh-config zenoh-listen.json5`, then the
+monitor, the publisher, `vss-sim` and `vss-listen` with
+`--zenoh-config zenoh-connect.json5`.
 
 ## State machine
 
@@ -191,9 +188,9 @@ stateDiagram-v2
   CRITICAL --> MITIGATING: mitigation requested
   MITIGATING --> MONITORING: T < critical_c - hysteresis for recovery_hold_ms
   MITIGATING --> CRITICAL: no improvement within mitigation_timeout_ms
-  CLEAR --> DEGRADED: signal lost / stuck
-  MONITORING --> DEGRADED: signal lost / stuck
-  WARNING --> DEGRADED: signal lost / stuck
+  CLEAR --> DEGRADED: signal untrusted
+  MONITORING --> DEGRADED: signal untrusted
+  WARNING --> DEGRADED: signal untrusted
   DEGRADED --> MONITORING: signal trusted again
 ```
 
@@ -201,9 +198,16 @@ With the defaults: WARNING at 55 °C or a rise of 0.5 °C/s over 10 s, CRITICAL
 after 65 °C for 2 s, recovery below 62 °C for 5 s, mitigation timeout 30 s.
 
 `DEGRADED` extends the suggested state machine from the challenge README. A
-lost or stuck temperature must not leave the Guardian quietly in MONITORING,
-because that would turn off the warning chain without anyone noticing.
-Instead the Guardian raises a fault and requests a fallback mitigation.
+lost, stuck or unusable temperature must not leave the Guardian quietly in
+MONITORING, because that would turn off the warning chain without anyone
+noticing. Instead the Guardian raises a fault and requests a fallback
+mitigation. The signal is untrusted when (see [Signal integrity](#signal-integrity)):
+
+| Condition | Reported as |
+|---|---|
+| no message for `stale_timeout_ms` | `TempSourceConnectionLost` |
+| messages arrive, but the rolling counter does not increase for `stuck_window_ms` | `TempSignalStuck` |
+| messages with new readings arrive, but none is accepted for `stale_timeout_ms` | the active per-sample faults, e.g. `TempOutOfRange` |
 
 CRITICAL and MITIGATING stay latched when the signal is lost. An active
 mitigation is not released just because the evidence went away, and the
@@ -226,9 +230,10 @@ replayable.
 
 Each sample passes these checks in order. A sample that fails a check is
 discarded and raises a fault. The fault clears after `heal_samples` accepted
-samples in a row. Discarded samples **do not refresh signal freshness**, so a
-stream that stays bad (delayed, out of range, spiking) ends in
-`TempSourceConnectionLost` and DEGRADED.
+samples in a row. If messages keep arriving but none is accepted for
+`stale_timeout_ms` (delayed, out of range, invalid, ...), the signal is
+untrusted and the Guardian goes to DEGRADED, with those faults as the
+reason. That is not a connection loss: data arrives.
 
 | Fault | Detection | Effect |
 |---|---|---|
@@ -237,8 +242,8 @@ stream that stays bad (delayed, out of range, spiking) ends in
 | `TransportDelay` | arrival − uMessage creation time > `max_latency_ms` | sample discarded |
 | `TempOutOfRange` | outside `[min_c, max_c]` or NaN | sample discarded |
 | `TempSignalSpike` | rate > `max_rate_c_per_s`, not confirmed by next sample | sample discarded |
-| `TempSignalStuck` | value unchanged for `stuck_window_ms` | **DEGRADED** |
-| `TempSourceConnectionLost` | no accepted sample for `stale_timeout_ms` | **DEGRADED** |
+| `TempSignalStuck` | same `rolling_counter` for `stuck_window_ms` (every repeat is also a `TransportDuplicate`) | **DEGRADED** |
+| `TempSourceConnectionLost` | no message for `stale_timeout_ms` | **DEGRADED** |
 | `PayloadInvalid` | payload is not a `VssSample`, or no UUIDv7 message id | message discarded |
 
 Fault events carry the DFM catalog id in `catalog_id` (`null` for the
@@ -260,8 +265,9 @@ newer, otherwise older:
 | 120 → 0, sent later | device restart: accepted, counting continues from 0 |
 
 Gaps are counted as `missing` in the heartbeat. A board whose counter has
-frozen produces only duplicates, so no sample is accepted and the Guardian
-raises `TempSourceConnectionLost` and goes to DEGRADED.
+frozen produces only duplicates; after `stuck_window_ms` the Guardian raises
+`TempSignalStuck` and goes to DEGRADED. A steady temperature with an
+increasing counter is not a fault.
 
 ## uProtocol contract
 
@@ -355,7 +361,7 @@ the file must be the same one the DFM loads.
 [`config/guardian.toml`](../battery-thermal-guardian/config/guardian.toml)
 lists every option with its default.
 [`config/demo.toml`](../battery-thermal-guardian/config/demo.toml) shortens the
-stuck and mitigation windows for demos. Unknown keys are rejected. `-c` selects
+mitigation timeout for demos. Unknown keys are rejected. `-c` selects
 the file, `--zenoh-config` a Zenoh configuration, `--dfm-catalog` the DFM
 catalog. Logging is controlled by
 `RUST_LOG` (e.g. `RUST_LOG=debug`) and goes to stderr.

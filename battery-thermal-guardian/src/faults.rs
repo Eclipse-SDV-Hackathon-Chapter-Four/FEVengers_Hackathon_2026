@@ -37,7 +37,7 @@ pub enum GuardianFault {
     ConnectionLost,
     /// Temperature outside the plausible range.
     OutOfRange,
-    /// Temperature value frozen.
+    /// Rolling counter not increasing: the device repeats its last reading.
     Stuck,
     /// Implausible jump between consecutive samples.
     Spike,

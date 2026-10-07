@@ -29,7 +29,7 @@ Code: [`vss-uprotocol-publisher/`](../vss-uprotocol-publisher/)
 ```mermaid
 flowchart LR
   AZ[AZ3166 / ThreadX] -->|MQTT over Wi-Fi| MQ[Mosquitto]
-  MQ -->|az3166/telemetry| P[vss-uprotocol-publisher<br/>subscribe · parse · VSS mapping · uMessage]
+  MQ -->|FEVengers_MQTT/telemetry| P[vss-uprotocol-publisher<br/>subscribe · parse · VSS mapping · uMessage]
   P -->|uMessage JSON<br/>//vehicle/8001/1/8001| Z[(uTransport<br/>Zenoh)]
   Z --> G[Battery Thermal Guardian]
 ```
@@ -58,7 +58,7 @@ The publisher logs `connected to MQTT broker`. Send one reading by hand from
 a second terminal:
 
 ```sh
-docker exec mosquitto mosquitto_pub -t az3166/telemetry \
+docker exec mosquitto mosquitto_pub -t FEVengers_MQTT/telemetry \
   -m '{"temperature_degC": 24.65, "counter": 1}'
 ```
 
@@ -100,12 +100,9 @@ vss-uprotocol-publisher/target/release/vss-listen -c vss-uprotocol-publisher/con
 `sent_ms` is the creation time from the uMessage id, `latency_ms` the time
 until it arrived. In the publisher itself, `RUST_LOG=info,zenoh=warn,vss_uprotocol_publisher=debug`
 logs every published sample, and `reading dropped` warnings show MQTT messages
-that could not be mapped. If `vss-listen` shows nothing, connect through a
-fixed address (see
-[If the monitor shows nothing](battery-thermal-guardian.md#if-the-monitor-shows-nothing)):
-without the Guardian, `vss-listen` takes its place and uses
-`config/zenoh-listen.json5`, the publisher or `vss-sim` uses
-`config/zenoh-connect.json5`. From the container image:
+that could not be mapped. If `vss-listen` shows nothing, see
+[If the monitor shows nothing](battery-thermal-guardian.md#if-the-monitor-shows-nothing)
+(Zenoh discovery). From the container image:
 `podman run --rm --net=host --entrypoint vss-listen vss-uprotocol-publisher -c /etc/vss-uprotocol-publisher/publisher.toml`.
 
 ### Simulated source (vss-sim)
@@ -126,11 +123,11 @@ vss-uprotocol-publisher/target/release/vss-sim stuck -c vss-uprotocol-publisher/
 | `nominal` | – | stable ~30 °C | MONITORING, no faults |
 | `overheat` | thermal | ramp to 72 °C, hold, cool down | WARNING → CRITICAL → MITIGATING (`REDUCE_POWER_MAX_COOLING`). demo.toml's 10 s mitigation timeout expires during the hold, so `OCCUPANT_EVACUATION_WARNING` follows; after cooling back to MONITORING, mitigations released |
 | `runaway` | thermal | ramp to 72 °C and keep rising | WARNING → CRITICAL → MITIGATING; every `mitigation_timeout_ms` back to CRITICAL with `OCCUPANT_EVACUATION_WARNING` re-asserted |
-| `stuck` | Signal | value frozen in the fault window | `TempSignalStuck` after `stuck_window_ms` (5 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the value changes again |
+| `stuck` | Signal | the device repeats its last reading in the fault window (rolling counter and value frozen) | `TransportDuplicate`, then `TempSignalStuck` after `stuck_window_ms` (3 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the counter increases again |
 | `spike` | Signal | every 4th sample +40 °C in the fault window | `TempSignalSpike`, spiked samples discarded, state unchanged; cleared after 5 good samples |
-| `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so `TempSourceConnectionLost` after 3 s → DEGRADED |
-| `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next sample |
-| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so `TempSourceConnectionLost` → DEGRADED. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
+| `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so after 3 s DEGRADED because of `TempOutOfRange` |
+| `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next message |
+| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so after 3 s DEGRADED because of `TransportDelay`. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
 | `duplicate` | Transport | every sample sent twice in the fault window | `TransportDuplicate`, duplicates discarded, state unchanged |
 | `reorder` | Transport | consecutive samples swapped in the fault window | `TransportOutOfOrder`, older sample discarded, state unchanged. Only some swapped pairs are detected, see [Current limits](#current-limits) |
 
@@ -161,7 +158,7 @@ To run it with the Guardian, see
 
 ## Input: MQTT
 
-Topic `az3166/telemetry` (configurable), one JSON object per second:
+Topic `FEVengers_MQTT/telemetry` (configurable), one JSON object per second:
 
 ```json
 {"pressure_hPa":1215.87,"temperature_degC":24.65,"humidity_perc":54.11,

@@ -104,10 +104,11 @@ pub enum GuardianState {
 // e.g. "TempSignalStuck".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FaultKind {
-    /// No accepted sample within the stale timeout (source dropout, e.g.
-    /// Wi-Fi/MQTT link to the AZ3166 lost).
+    /// No message within the stale timeout (source dropout, e.g. Wi-Fi/MQTT
+    /// link to the AZ3166 lost).
     TempSourceConnectionLost,
-    /// Value has not changed for longer than the stuck window.
+    /// Messages arrive, but the device's rolling counter has not increased
+    /// for longer than the stuck window (the device repeats its last reading).
     TempSignalStuck,
     /// Value outside the physically plausible range.
     TempOutOfRange,

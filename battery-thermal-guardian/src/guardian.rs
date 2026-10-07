@@ -177,9 +177,10 @@ impl Guardian {
     }
 
     /// Processes a uProtocol message whose payload is not a valid VSS sample.
-    // Only produces a PayloadInvalid fault; the state does not change.
+    // Only produces a PayloadInvalid fault (and ends a connection loss: data
+    // arrives again); the state does not change.
     pub fn on_invalid_payload(&mut self, detail: String, now_ms: u64) -> Vec<GuardianEvent> {
-        let changes = self.signal.on_invalid_payload(detail);
+        let changes = self.signal.on_invalid_payload(detail, now_ms);
         let step = Step {
             now_ms,
             trigger: None,
@@ -192,18 +193,20 @@ impl Guardian {
     // Called by service.rs every tick_period_ms (100 ms). This is the only way
     // to notice that samples *stopped* arriving.
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<GuardianEvent> {
-        // The only fault a tick can raise is TempSourceConnectionLost.
+        // A tick can raise TempSourceConnectionLost, or notice that no sample
+        // was accepted for a while (persistent rejection).
+        let was_disarmed = self.signal.is_disarmed();
         let changes = self.signal.on_tick(now_ms);
         let mut step = Step {
             now_ms,
             trigger: None,
             events: Vec::new(),
         };
-        // Signal went stale: old trend points are no longer meaningful.
-        if !changes.is_empty() {
+        // Signal lost: old trend points are no longer meaningful.
+        if !changes.is_empty() || (!was_disarmed && self.signal.is_disarmed()) {
             self.trend.clear();
         }
-        // Stale -> maybe DEGRADED.
+        // Signal lost -> maybe DEGRADED.
         self.sync_with_signal(&mut step);
         // A mitigation can fail even when no samples arrive.
         self.check_mitigation_timeout(&mut step);

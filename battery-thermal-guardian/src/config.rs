@@ -85,7 +85,8 @@ pub struct SignalConfig {
     /// Plausible range; values outside raise TempOutOfRange.
     pub min_c: f64,
     pub max_c: f64,
-    /// No accepted sample for this long raises TempSourceConnectionLost.
+    /// No message for this long raises TempSourceConnectionLost. Messages
+    /// but no accepted sample for this long also makes the signal untrusted.
     pub stale_timeout_ms: u64,
     /// Samples older than this on arrival are rejected (TransportDelay).
     pub max_latency_ms: u64,
@@ -93,10 +94,9 @@ pub struct SignalConfig {
     pub max_rate_c_per_s: f64,
     /// Consecutive samples needed to confirm a fast change as genuine.
     pub spike_confirm_samples: u32,
-    /// Unchanged value for this long raises TempSignalStuck (0 disables).
+    /// Rolling counter not increasing for this long raises TempSignalStuck
+    /// (0 disables).
     pub stuck_window_ms: u64,
-    /// Changes smaller than this count as "unchanged".
-    pub stuck_epsilon_c: f64,
     /// Consecutive accepted samples that clear a per-sample fault.
     pub heal_samples: u32,
     /// Consecutive accepted samples required before the signal is trusted.
@@ -116,9 +116,7 @@ impl Default for SignalConfig {
             max_latency_ms: 1000,
             max_rate_c_per_s: 10.0,
             spike_confirm_samples: 2,
-            stuck_window_ms: 30_000,
-            // 0.0 = only exactly identical values count as "stuck".
-            stuck_epsilon_c: 0.0,
+            stuck_window_ms: 3000,
             heal_samples: 5,
             trust_samples: 3,
             counter_modulus: 256,
