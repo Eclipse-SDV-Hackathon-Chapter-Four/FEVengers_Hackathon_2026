@@ -425,7 +425,7 @@ cd battery-thermal-guardian && cargo test
 No local Rust toolchain? Use the official Rust image with libclang added:
 
 ```sh
-printf 'FROM docker.io/library/rust:1-bookworm\nRUN apt-get update && apt-get install -y clang libclang-dev\n' \
+printf 'FROM docker.io/library/rust:1.99.0-bookworm\nRUN apt-get update && apt-get install -y clang libclang-dev\n' \
   | docker build -t rust-clang -
 alias cargo='docker run --rm -it --net=host -u "$(id -u):$(id -g)" -e CARGO_HOME=/w/target/cargo-home -v "$PWD":/w -w /w rust-clang cargo'
 ```

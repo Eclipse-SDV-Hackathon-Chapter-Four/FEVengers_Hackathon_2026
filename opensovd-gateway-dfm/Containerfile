@@ -20,7 +20,7 @@ ARG UPSTREAM_REV=1bf4c47c68dde44fb81ee1301619ac3957f08c92
 ARG FAULTLIB_REV=12dac502616701734f90a61edca1326ae2ac6506
 
 # ---- Build stage ----
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
 ARG EXAMPLE_REPO
 ARG EXAMPLE_REV
 ARG UPSTREAM_REPO
@@ -30,9 +30,11 @@ ARG FAULTLIB_REV
 RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev git \
     && rm -rf /var/lib/apt/lists/*
 
-# Use the image's stable toolchain instead of the nightly pinned in rust-toolchain.toml
-# (verified to build with stable 1.97).
-ENV RUSTUP_TOOLCHAIN=stable
+# Use the compiler of this image instead of the nightly pinned in
+# rust-toolchain.toml. Named by version: "stable" would mean "the newest", which
+# changes over time and is downloaded on every build because the image does not
+# carry a toolchain of that name. (Built with 1.97 and 1.99.)
+ENV RUSTUP_TOOLCHAIN=1.99.0
 
 WORKDIR /src
 # Reference implementation (example branch)

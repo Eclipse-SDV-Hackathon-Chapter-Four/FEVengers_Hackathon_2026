@@ -64,8 +64,10 @@ archive="ankaios-linux-$arch.tar.gz"
 base="https://github.com/eclipse-ankaios/ankaios/releases/download/$ANKAIOS_VERSION"
 
 cd /var/tmp
-curl -sfLO "$base/$archive"
-curl -sfLO "$base/$archive.sha512sum.txt"
+# Retries: right after boot, or on a slow network, the first name lookup can time out.
+fetch() { curl -sSfLO --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "$1"; }
+fetch "$base/$archive"
+fetch "$base/$archive.sha512sum.txt"
 sha512sum -c "$archive.sha512sum.txt"
 python3 -W ignore -c 'import sys, tarfile; tarfile.open(sys.argv[1]).extractall("/usr/local/bin")' "$archive"
 chown root:root /usr/local/bin/ank /usr/local/bin/ank-server /usr/local/bin/ank-agent

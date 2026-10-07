@@ -1,0 +1,13 @@
+# Created with AI assistance (Claude Opus 5.5, Anthropic).
+#
+# Expected Guardian limits, held independently by the evidence collector.
+# Each evidence row shows the limit that applies to its fault and whether the
+# measured values really break it (independent cross-check of the Guardian).
+# Values = defaults of battery-thermal-guardian/config/guardian.toml [signal].
+# If the Guardian runs with another config (e.g. demo.toml), copy its values here.
+
+min_c = -40.0               # TempOutOfRange below
+max_c = 150.0               # TempOutOfRange above
+max_rate_c_per_s = 10.0     # TempSignalSpike: |rate| above this
+stuck_window_ms = 3000      # TempSignalStuck: rolling counter not increasing this long
+stale_timeout_ms = 3000     # TempSourceConnectionLost: no sample this long

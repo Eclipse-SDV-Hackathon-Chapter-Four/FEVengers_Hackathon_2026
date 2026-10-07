@@ -2,6 +2,8 @@
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
+> **Historical.** The SOVD fault bridge described here was used until the OpenSOVD gateway replaced it (same DFM query interface, standard SOVD path, port 7690; see [`opensovd-gateway-dfm.md`](opensovd-gateway-dfm.md)). Its code (`sovd/sovd-fault-bridge/`) was removed from the repository on 7 October 2026, so the build and run commands below no longer work. The code is in the git history up to commit `0fda212` (`git show 0fda212:<path>`). The DFM finding in section 9 is still valid.
+
 Exposes faults stored in the Eclipse OpenSOVD **Diagnostic Fault Manager (DFM)** over a SOVD-style REST `/faults` API.
 
 Status: working end to end on Ubuntu (Podman) with the DFM container and `tst_app`. Hackathon quick fix, not following upstream coding guidelines, not intended for upstream as is.

@@ -17,7 +17,7 @@
 
 # ---- Build stage ----
 # Full Rust toolchain; compiles the publisher in release mode.
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
 WORKDIR /src
 # Manifest and lock file first, then the sources.
 COPY Cargo.toml Cargo.lock ./

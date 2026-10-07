@@ -27,7 +27,7 @@
 
 # ---- Build stage ----
 # Full Rust toolchain; compiles all three binaries in release mode.
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
 # iceoryx2 (used by fault-lib) generates its POSIX bindings with bindgen,
 # which needs libclang at build time.
 RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev \

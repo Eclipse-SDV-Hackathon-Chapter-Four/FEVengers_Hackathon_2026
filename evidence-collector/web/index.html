@@ -1,0 +1,299 @@
+<!doctype html>
+<!-- Created with AI assistance (Claude Opus 5.5, Anthropic). -->
+<!-- Evidence collector UI: Start / Stop an evidence run; every fault raised or cleared appears with previous and current value. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence Collector</title>
+<style>
+  /* No external resources: works offline in AutoSD. */
+  :root {
+    --bg: #eef1f4; --panel: #ffffff; --fg: #141a22; --muted: #5b6573; --line: #dde2e8;
+    --brand: #2c2255; --brand-2: #f7941e; --accent: #3b2f7a;
+    --bad: #c4291c; --bad-bg: #fdeae8;
+    --ok: #23784a; --ok-bg: #e2f4ea;
+    --warn: #9a5b00; --warn-bg: #fdf1dc;
+    --rec: #e0352b;
+    --shadow: 0 1px 2px rgba(20,26,34,.06), 0 4px 16px rgba(20,26,34,.06);
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b24; --fg: #e6e9ef; --muted: #9aa3b2; --line: #272d3a;
+      --brand: #221a45; --brand-2: #ffa43d; --accent: #a99bff;
+      --bad: #ff8a7f; --bad-bg: #3a1c1a; --ok: #7fd8a4; --ok-bg: #16301f;
+      --warn: #f6c56b; --warn-bg: #362913; --rec: #ff5a4f;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+
+  .topbar { background: var(--brand); color: #fff; border-bottom: 3px solid var(--brand-2); position: relative; overflow: hidden; }
+  .topbar .in { max-width: 1280px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 16px; }
+  .title { flex: 1; min-width: 0; }
+  .title h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
+  .title p { margin: 2px 0 0; font-size: .85rem; opacity: .8; }
+  .logo { height: 44px; max-width: 200px; object-fit: contain; background: #fff; border-radius: 8px; padding: 4px 8px; }
+  /* Scanning bar under the header while recording */
+  .scan { position: absolute; left: 0; bottom: -3px; height: 3px; width: 30%; background: linear-gradient(90deg, transparent, #fff, transparent); opacity: 0; }
+  body.rec .scan { opacity: .9; animation: scan 1.6s linear infinite; }
+  @keyframes scan { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 18px; }
+
+  /* Control panel: big button + run info + live values */
+  .control { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 24px; box-shadow: var(--shadow); }
+  .btnwrap { position: relative; width: 132px; height: 132px; display: grid; place-items: center; }
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--rec); opacity: 0; }
+  body.rec .ring { animation: ripple 2s ease-out infinite; }
+  body.rec .ring.r2 { animation-delay: .66s; }
+  body.rec .ring.r3 { animation-delay: 1.33s; }
+  @keyframes ripple { 0% { transform: scale(.75); opacity: .7; } 100% { transform: scale(1.35); opacity: 0; } }
+  #toggle { position: relative; width: 112px; height: 112px; border-radius: 50%; border: none; cursor: pointer; color: #fff; font: 700 .95rem/1.2 var(--sans); letter-spacing: .04em; background: var(--accent); box-shadow: 0 6px 18px rgba(59,47,122,.35); transition: transform .15s, background .2s; }
+  #toggle:hover { transform: scale(1.04); }
+  #toggle:disabled { opacity: .6; cursor: wait; }
+  body.rec #toggle { background: var(--rec); box-shadow: 0 6px 22px rgba(224,53,43,.45); }
+  #toggle .ico { display: block; margin: 0 auto 6px; width: 22px; height: 22px; background: #fff; border-radius: 50%; }
+  body.rec #toggle .ico { border-radius: 4px; }
+  :focus-visible { outline: 3px solid var(--brand-2); outline-offset: 3px; }
+
+  .runinfo { display: grid; gap: 12px; min-width: 0; }
+  .runline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; }
+  .recbadge { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: .8rem; letter-spacing: .08em; color: var(--muted); }
+  .recbadge i { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  body.rec .recbadge { color: var(--rec); }
+  body.rec .recbadge i { background: var(--rec); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  .timer { font: 700 2rem/1 var(--mono); font-variant-numeric: tabular-nums; }
+  .runid { font-family: var(--mono); font-size: .85rem; color: var(--muted); overflow-wrap: anywhere; }
+
+  .live { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .tile .l { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; }
+  .tile .v { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile .v small { font-size: .8rem; font-weight: 500; color: var(--muted); }
+  .tile { min-width: 0; } .tile .v { overflow-wrap: anywhere; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: var(--muted); vertical-align: middle; }
+  .dot.up { background: var(--ok); } .dot.down { background: var(--bad); }
+
+  /* Evidence table */
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+  .cardhead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .cardhead h2 { margin: 0; font-size: 1rem; }
+  .counts { color: var(--muted); font-size: .85rem; }
+  .counts b { color: var(--fg); }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 980px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: .7rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  tr.r-RAISED td:first-child { box-shadow: inset 4px 0 0 var(--bad); }
+  tr.r-CLEARED td:first-child { box-shadow: inset 4px 0 0 var(--ok); }
+  tr.new { animation: slidein .6s ease-out; }
+  tr.new td { animation: flash 1.8s ease-out; }
+  @keyframes slidein { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes flash { from { background: color-mix(in srgb, var(--brand-2) 28%, transparent); } to { background: transparent; } }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--mono); font-size: .82rem; }
+  .muted { color: var(--muted); }
+  .chip { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .72rem; font-weight: 700; letter-spacing: .05em; }
+  .chip.RAISED { color: var(--bad); background: var(--bad-bg); }
+  .chip.CLEARED { color: var(--ok); background: var(--ok-bg); }
+  .chip.REQUESTED { color: #fff; background: var(--brand-2); }
+  .chip.RELEASED { color: var(--brand-2); background: color-mix(in srgb, var(--brand-2) 14%, transparent); }
+  tr.r-REQUESTED td:first-child { box-shadow: inset 4px 0 0 var(--brand-2); }
+  tr.r-RELEASED td:first-child { box-shadow: inset 4px 0 0 color-mix(in srgb, var(--brand-2) 45%, transparent); }
+  tr.k-mitigation td { background: color-mix(in srgb, var(--brand-2) 5%, transparent); }
+  .kind { display: block; font-size: .68rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+  .kind.mitigation { color: var(--brand-2); }
+  .chip.ok { color: var(--ok); background: var(--ok-bg); }
+  .lim { white-space: nowrap; }
+  .chip.state { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .vals { display: flex; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .vals .p { color: var(--muted); }
+  .vals .c { font-weight: 700; }
+  .vals .arrow { color: var(--muted); }
+  .rc { display: block; font-size: .72rem; color: var(--muted); font-family: var(--mono); }
+  .up { color: var(--bad); } .down { color: #2f6fd0; }
+  .fault { font-weight: 600; }
+  .fault small { display: block; font-weight: 400; color: var(--muted); font-family: var(--mono); font-size: .75rem; }
+  .reason { font-size: .82rem; color: var(--muted); max-width: 320px; }
+  .empty { padding: 36px 14px; text-align: center; color: var(--muted); }
+
+  .result { display: none; background: var(--panel); border: 1px solid var(--line); border-left: 5px solid var(--accent); border-radius: 12px; padding: 12px 16px; box-shadow: var(--shadow); }
+  .result.show { display: block; }
+  .result code { font-family: var(--mono); font-size: .85rem; overflow-wrap: anywhere; }
+  .err { color: var(--bad); font-weight: 600; min-height: 1.2em; }
+
+  @media (max-width: 640px) {
+    .control { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+    .runline { justify-content: center; }
+    .logo { height: 34px; max-width: 120px; }
+    .title p { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="in">
+    <div class="title">
+      <h1>Evidence Collector</h1>
+      <p>Battery Thermal Guardian · uProtocol evidence · Team FEVengers</p>
+    </div>
+    <img class="logo" src="logo" alt="Eclipse SDV Hackathon" onerror="this.remove()">
+  </div>
+  <div class="scan"></div>
+</header>
+
+<main class="wrap">
+  <section class="control" aria-label="Run control">
+    <div class="btnwrap">
+      <span class="ring"></span><span class="ring r2"></span><span class="ring r3"></span>
+      <button id="toggle" type="button"><span class="ico"></span><span id="toggleText">START<br>EVIDENCE</span></button>
+    </div>
+    <div class="runinfo">
+      <div class="runline">
+        <span class="recbadge"><i></i><span id="recText">IDLE</span></span>
+        <span class="timer" id="timer">00:00</span>
+        <span class="runid" id="runid">No run yet</span>
+      </div>
+      <div class="live">
+        <div class="tile"><div class="l">Temperature</div><div class="v" id="temp">–</div></div>
+        <div class="tile"><div class="l">Guardian state</div><div class="v" id="state">–</div></div>
+        <div class="tile"><div class="l">Guardian</div><div class="v" id="alive">–</div></div>
+        <div class="tile"><div class="l">Active faults</div><div class="v" id="active">–</div></div>
+        <div class="tile"><div class="l">Active mitigations</div><div class="v" id="mitig">–</div></div>
+      </div>
+      <div class="err" id="error" role="status"></div>
+    </div>
+  </section>
+
+  <section class="result" id="result" aria-live="polite"></section>
+
+  <section class="card" aria-label="Evidence">
+    <div class="cardhead">
+      <h2>Fault &amp; mitigation evidence <span class="muted" style="font-weight:400">· newest first</span></h2>
+      <span class="counts" id="counts">–</span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Time</th><th>Fault / mitigation</th><th>Event</th>
+            <th>Previous → Current (°C)</th><th class="num">Δ °C</th><th class="num">Rate °C/s</th>
+            <th>Limit check</th><th>State</th><th>Guardian reason</th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="10" class="empty">Press <b>Start evidence</b>. Every fault raised / cleared and every mitigation requested / released will appear here with the values that caused it.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const fmt = (x, d = 2) => (x === null || x === undefined ? "–" : Number(x).toFixed(d));
+  const sign = (x, d = 2) => (x === null || x === undefined ? "–" : (x > 0 ? "+" : "") + Number(x).toFixed(d));
+  const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false }) + "." + String(ms % 1000).padStart(3, "0");
+  const mmss = (ms) => { const s = Math.floor(ms / 1000); return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); };
+
+  let recording = false, startedMs = null, serverOffset = 0, seen = new Set(), busy = false;
+
+  function sampleCell(p, c) {
+    const pv = p ? `<span class="p">${fmt(p.value)}<span class="rc">#${esc(p.rolling_counter ?? "–")}</span></span>` : `<span class="p">–</span>`;
+    const cv = c ? `<span class="c">${fmt(c.value)}<span class="rc">#${esc(c.rolling_counter ?? "–")}</span></span>` : `<span class="c">–</span>`;
+    return `<div class="vals">${pv}<span class="arrow">→</span>${cv}</div>`;
+  }
+
+  function render(s) {
+    recording = s.recording;
+    document.body.classList.toggle("rec", recording);
+    $("recText").textContent = recording ? "RECORDING" : "IDLE";
+    $("toggleText").innerHTML = recording ? "STOP<br>EVIDENCE" : "START<br>EVIDENCE";
+    startedMs = s.started_ms;
+    serverOffset = s.now_ms - Date.now();
+    if (recording) $("runid").textContent = s.run_id;
+    else if (s.last_run) $("runid").textContent = "Last: " + s.last_run.id;
+
+    const L = s.live || {};
+    $("temp").innerHTML = L.temp == null ? "–" : `${fmt(L.temp)} <small>°C · #${esc(L.rolling_counter ?? "–")}</small>`;
+    $("state").textContent = L.state || "–";
+    $("alive").innerHTML = L.hb_age_ms == null ? `<span class="dot"></span>no heartbeat`
+      : L.guardian_alive ? `<span class="dot up"></span>alive` : `<span class="dot down"></span>silent ${Math.round(L.hb_age_ms / 1000)} s`;
+    const af = Array.isArray(L.active_faults) ? L.active_faults : [];
+    $("active").innerHTML = af.length ? `<span class="up">${af.length}</span> <small>${esc(af.join(", "))}</small>` : "0";
+    const am = Array.isArray(L.active_mitigations) ? L.active_mitigations : [];
+    $("mitig").innerHTML = am.length ? `<span style="color:var(--brand-2)">${am.length}</span> <small>${esc(am.join(", "))}</small>` : "0";
+
+    $("counts").innerHTML = s.total
+      ? `<b>${s.total}</b> events · <b>${s.raised}</b> raised · <b>${s.cleared}</b> cleared · <b>${s.mitigations ?? 0}</b> mitigation${s.total > s.rows.length ? ` · showing newest ${s.rows.length}` : ""}`
+      : "no events";
+
+    const rows = s.rows || [];
+    const key = (r) => (s.run_id || (s.last_run && s.last_run.id) || "") + ":" + r.n;
+    $("rows").innerHTML = rows.length ? rows.map((r) => {
+      const isNew = !seen.has(key(r)); seen.add(key(r));
+      const dir = r.delta_c > 0 ? "up" : r.delta_c < 0 ? "down" : "";
+      return `<tr class="r-${esc(r.status)} k-${esc(r.kind || "fault")}${isNew ? " new" : ""}">
+        <td class="num mono">${r.n}</td>
+        <td class="mono">${clock(r.at_ms)}</td>
+        <td class="fault"><span class="kind ${esc(r.kind || "fault")}">${r.kind === "mitigation" ? "mitigation" : "fault"}</span>${esc(r.fault)}<small>${esc(r.catalog_id || r.class || "")}</small></td>
+        <td><span class="chip ${esc(r.status)}">${esc(r.status)}</span>${r.cause === "timer" ? `<span class="rc">timeout</span>` : ""}</td>
+        <td>${sampleCell(r.previous, r.current)}</td>
+        <td class="num ${dir}">${sign(r.delta_c)}</td>
+        <td class="num ${dir}">${sign(r.rate_c_per_s, 1)}</td>
+        <td class="lim">${r.limit ? `${r.limit_broken === true ? `<span class="chip ok">✔ confirmed</span>` : r.limit_broken === false ? `<span class="chip RAISED">✖ not seen</span>` : ""}
+            <span class="rc">${esc(r.measured || "–")}</span><span class="rc">limit ${esc(r.limit)}</span>` : `<span class="muted">–</span>`}</td>
+        <td>${r.state ? `<span class="chip state">${esc(r.state)}</span>` : "–"}</td>
+        <td class="reason">${esc(r.detail)}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="10" class="empty">${recording ? "Recording… waiting for the first fault or mitigation event." : "Press <b>Start evidence</b>. Every fault raised / cleared and every mitigation requested / released will appear here with the values that caused it."}</td></tr>`;
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch("api/status", { cache: "no-store" });
+      render(await res.json());
+      if (!busy) $("error").textContent = "";
+    } catch (e) {
+      $("error").textContent = "Collector not reachable: " + e.message;
+    }
+  }
+
+  function showResult(r) {
+    const box = $("result");
+    box.innerHTML = `<b>Run ${esc(r.id)} saved.</b> ${r.faults} fault events (${r.raised} raised, ${r.cleared} cleared), ${r.messages} uProtocol messages, ${(r.duration_ms / 1000).toFixed(1)} s.<br>
+      Evidence folder: <code>${esc(r.dir)}</code> — events.jsonl · faults.json · summary.json · report.md`;
+    box.classList.add("show");
+  }
+
+  $("toggle").addEventListener("click", async () => {
+    busy = true; $("toggle").disabled = true;
+    try {
+      const res = await fetch(recording ? "api/stop" : "api/start", { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      if (recording) showResult(body); else { $("result").classList.remove("show"); seen = new Set(); }
+      $("error").textContent = "";
+    } catch (e) {
+      $("error").textContent = (recording ? "Stop" : "Start") + " failed: " + e.message;
+    }
+    busy = false; $("toggle").disabled = false;
+    poll();
+  });
+
+  // Smooth timer between polls
+  setInterval(() => {
+    $("timer").textContent = recording && startedMs ? mmss(Date.now() + serverOffset - startedMs) : $("timer").textContent;
+  }, 250);
+
+  poll();
+  setInterval(poll, 500);
+</script>
+</body>
+</html>
