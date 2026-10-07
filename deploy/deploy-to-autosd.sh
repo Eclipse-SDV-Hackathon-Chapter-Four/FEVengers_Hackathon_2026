@@ -7,13 +7,20 @@
 #   ./deploy/deploy-to-autosd.sh --no-build    same, without loading the images again (they are already on the target)
 #   ./deploy/deploy-to-autosd.sh --no-persist  start the workloads for this boot only
 #   ./deploy/deploy-to-autosd.sh status        show the Ankaios workloads on the target
+#   ./deploy/deploy-to-autosd.sh check         compare the target with the manifest, name by name; changes nothing
+#   ./deploy/deploy-to-autosd.sh sync          remove what the manifest does not use, add what is missing;
+#                                              running workloads and stored images are left alone
+#   ./deploy/deploy-to-autosd.sh clear-faults  empty the DFM's fault memory (start of a test run)
+#   ./deploy/deploy-to-autosd.sh reset [--yes] remove our workloads, images and files from the target;
+#                                              without --yes it only shows what it would remove
 #
 # The deployment is persistent: the manifest becomes the Ankaios startup
 # manifest on the target, so the workloads start by themselves at every boot.
 #
 # Run ./deploy/build-images.sh first. Only the localhost/* images named in the
-# manifest are loaded; workloads that use them are restarted, all others
-# (e.g. the MQTT broker) are left running.
+# manifest are loaded; workloads that use them are restarted, other workloads
+# of the manifest (e.g. the MQTT broker) are left running, and workloads on
+# the target that the manifest does not list are removed.
 #
 # The target is reached over SSH. Default is the QEMU image on this machine
 # (127.0.0.1:2222, no IP needed); for a device on the network set AUTOSD_HOST
@@ -33,10 +40,17 @@ TAG_NAME=deploy
 IMAGES_DIR="${IMAGES_DIR:-$REPO/build/images}"
 MANIFEST="${MANIFEST:-$REPO/deploy/ankaios-manifest.yaml}"
 
-# Fault catalogs on the target (mounted into the dfm workload).
-T_CATALOGS=/var/lib/fevengers/catalogs
+# Everything the deployment puts on the target lives in this folder.
+T_DATA=/var/lib/fevengers
+# Fault catalogs on the target (mounted into the dfm and guardian workloads).
+T_CATALOGS=$T_DATA/catalogs
+# Fault monitor page, served by the opensovd-gateway workload on /ui/.
+WEBUI_DIR="$REPO/opensovd-gateway-dfm/webui"
+T_WEBUI=$T_DATA/webui
+# Fault table for the terminal, used on the target as "watch -n 1 /root/faults.sh".
+FAULTS_SCRIPT="$REPO/opensovd-gateway-dfm/faults.sh"
 
-usage() { sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------- manifest
 # Prints "workload image" for every workload of the manifest.
@@ -82,17 +96,44 @@ load_images() {
 
 prepare_vm() {
   local f
-  log "preparing the target ($T_IOX, $T_CATALOGS)"
-  target "mkdir -p $T_IOX $T_CATALOGS"
+  log "preparing the target ($T_IOX, $T_CATALOGS, $T_WEBUI)"
+  target "mkdir -p $T_IOX $T_CATALOGS $T_WEBUI"
   for f in "$REPO"/catalogs/*.json; do
     [ -f "$f" ] || fail "no fault catalog in catalogs/"
     target "cat > $T_CATALOGS/$(basename "$f")" <"$f"
   done
+  for f in "$WEBUI_DIR"/*; do
+    [ -f "$f" ] || fail "no web UI files in ${WEBUI_DIR#"$REPO"/}/"
+    target "cat > $T_WEBUI/$(basename "$f")" <"$f"
+  done
+  if [ -f "$FAULTS_SCRIPT" ]; then
+    target "cat > /root/faults.sh && chmod +x /root/faults.sh" <"$FAULTS_SCRIPT"
+  fi
+}
+
+# Workloads running on the target that the manifest no longer lists (e.g. a
+# service that was replaced). "ank apply" would leave them running.
+stale_workloads() {
+  local name wanted
+  wanted=" $(manifest_images | awk '{print $1}' | tr '\n' ' ')"
+  for name in $(target "$ANK get workloads" | awk 'NR > 1 {print $1}'); do
+    case "$wanted" in
+      *" $name "*) ;;
+      *) echo "$name" ;;
+    esac
+  done
 }
 
 apply_manifest() {
-  local workloads
+  local workloads stale
   workloads="$(own_workloads | tr '\n' ' ')"
+  stale="$(stale_workloads | tr '\n' ' ')"
+  # The manifest is the whole desired state: what it does not list is removed.
+  if [ -n "$stale" ]; then
+    log "removing workloads that are not in the manifest: $stale"
+    # shellcheck disable=SC2086
+    target "$ANK delete workload $stale" >/dev/null 2>&1 || true
+  fi
   # Ankaios leaves an unchanged workload alone, so a new image would not be
   # picked up: delete our workloads first, then apply the whole manifest.
   log "restarting workloads: $workloads"
@@ -137,17 +178,238 @@ wait_running() {
   fail "not running after 60 s: $pending(logs: podman logs <container> on the target)"
 }
 
+# ---------------------------------------------------------------- maintenance
+# What the target reports, fetched in one SSH call: workloads with their
+# state, stored images and the checksum of the startup manifest (without
+# comments and blank lines, see manifest_digest).
+target_facts() {
+  target "
+    echo '== workloads'; $ANK get workloads | awk 'NR > 1 {print \$1, \$4}'
+    echo '== images'; podman images --format '{{.Repository}}:{{.Tag}}'
+    echo '== startup'; sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*\$/d' $T_STARTUP_MANIFEST 2>/dev/null | sha256sum | cut -d' ' -f1
+  "
+}
+
+# section <name>: the lines of one "== name" section of $FACTS.
+section() { printf '%s\n' "$FACTS" | awk -v s="== $1" '$0 == s {on = 1; next} /^== / {on = 0} on'; }
+
+# Checksum of the manifest without comments and blank lines, so that only a
+# change of the workloads counts as a difference to the startup manifest.
+manifest_digest() {
+  sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$MANIFEST" | {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+  } | cut -d' ' -f1
+}
+
+# The manifest without the workloads that run our own images: what is left
+# on the target after a reset (the MQTT broker). Comments are dropped.
+base_manifest() {
+  awk '
+    function flush() { if (inblock && !own) printf "%s", block; block = ""; inblock = 0; own = 0 }
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); inblock = 1 }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    inblock { block = block $0 "\n"; if ($0 ~ /image:[[:space:]]*localhost\//) own = 1; next }
+    { print }
+    END { flush() }
+  ' "$MANIFEST"
+}
+
+# Compares the target with the manifest, workload by workload. Changes nothing.
+cmd_check() {
+  local name image state stored problems=0 used
+  FACTS="$(target_facts)" || fail "could not query the target"
+  printf '%-18s %-14s %-9s %s\n' WORKLOAD STATE IMAGE "(image)"
+  while read -r name image; do
+    state="$(section workloads | awk -v n="$name" '$1 == n {print $2}')"
+    stored=missing
+    section images | grep -qxF "$image" && stored=stored
+    printf '%-18s %-14s %-9s %s\n' "$name" "${state:-missing}" "$stored" "$image"
+    { [ "$state" = "Running(Ok)" ] && [ "$stored" = stored ]; } || problems=$((problems + 1))
+  done <<EOF
+$(manifest_images)
+EOF
+
+  # Running on the target, but not in the manifest.
+  for name in $(section workloads | awk '{print $1}'); do
+    manifest_images | awk -v n="$name" '$1 == n {found = 1} END {exit !found}' && continue
+    warn "workload '$name' runs on the target but is not in the manifest (the next deploy removes it)"
+    problems=$((problems + 1))
+  done
+
+  # Our images on the target that no workload of the manifest uses: only disk space.
+  used="$(manifest_images | awk '{print $2}')"
+  for image in $(section images | grep '^localhost/' || true); do
+    printf '%s\n' "$used" | grep -qxF "$image" && continue
+    log "unused image on the target: $image (remove: podman rmi $image)"
+  done
+
+  if [ "$(section startup)" != "$(manifest_digest)" ]; then
+    warn "the startup manifest on the target differs from $(basename "$MANIFEST"): after a reboot something else starts (fix: deploy again)"
+    problems=$((problems + 1))
+  fi
+
+  [ "$problems" -eq 0 ] || fail "$problems difference(s) between the target and the manifest"
+  log "ok: the target matches the manifest"
+}
+
+# Empties the DFM's fault memory through the SOVD interface, as at the start
+# of a test run. Runs curl on the target, so no port forward is needed.
+cmd_clear_faults() {
+  local app url code
+  app="$(sed -n 's/.*"--dfm-fault-app", *"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
+  [ -n "$app" ] || fail "no --dfm-fault-app in $MANIFEST: cannot tell which SOVD app holds the faults"
+  url="http://127.0.0.1:7690/sovd/v1/apps/$app/faults"
+  log "clearing the fault memory of '$app' (DELETE $url on the target)"
+  code="$(target "curl -s -m 10 -o /dev/null -w '%{http_code}' -X DELETE $url")" || true
+  [ "$code" = 204 ] || fail "the SOVD gateway answered HTTP ${code:-nothing} instead of 204; is the opensovd-gateway workload running?"
+  target "test -x /root/faults.sh && /root/faults.sh" || true
+  log "cleared. A fault that is active right now appears again only when it next changes: the Guardian reports changes, not states"
+}
+
+# Brings the target in line with the manifest with as little change as
+# possible: removes what the manifest does not use, adds what is missing.
+# Unlike a full deploy it does not reload images that are already stored and
+# does not restart workloads that are running.
+cmd_sync() {
+  local name image state tar stale="" broken="" unused="" changes=0
+  FACTS="$(target_facts)" || fail "could not query the target"
+
+  # Workloads on the target that the manifest does not list.
+  for name in $(section workloads | awk '{print $1}'); do
+    manifest_images | awk -v n="$name" '$1 == n {found = 1} END {exit !found}' || stale="$stale $name"
+  done
+  if [ -n "$stale" ]; then
+    log "removing workloads that are not in the manifest:$stale"
+    # shellcheck disable=SC2086
+    target "$ANK delete workload $stale" >/dev/null 2>&1 || true
+    changes=$((changes + 1))
+  fi
+
+  # Our images that the manifest needs but the target does not have.
+  for image in $(own_images); do
+    section images | grep -qxF "$image" && continue
+    tar="$(archive_of "$image")"
+    [ -f "$tar" ] || fail "$image is missing on the target and has no archive ($tar). Run ./deploy/build-images.sh"
+    log "loading missing image $image ($(du -h "$tar" | cut -f1))"
+    target 'podman load -q >/dev/null' <"$tar" || fail "$image: podman load failed on the target"
+    changes=$((changes + 1))
+  done
+
+  # Catalog, web page and fault table: cheap, so always brought up to date.
+  prepare_vm
+
+  # Workloads of the manifest that are missing or not running. "ank apply"
+  # adds the missing ones and leaves the running ones alone; one that exists
+  # in another state has to be deleted first, or apply would not restart it.
+  while read -r name image; do
+    state="$(section workloads | awk -v n="$name" '$1 == n {print $2}')"
+    [ "$state" = "Running(Ok)" ] && continue
+    broken="$broken $name"
+    # </dev/null: ssh must not swallow the rest of the workload list.
+    [ -z "$state" ] || target "$ANK delete workload $name" </dev/null >/dev/null 2>&1 || true
+  done <<EOF
+$(manifest_images)
+EOF
+  if [ -n "$broken" ]; then
+    log "starting workloads that are missing or not running:$broken"
+    # ank prints a progress table per state change; the check below shows the result.
+    target "$ANK apply -" <"$MANIFEST" >/dev/null || fail "ank apply failed"
+    changes=$((changes + 1))
+  fi
+
+  # Our images on the target that no workload of the manifest uses.
+  for image in $(section images | grep '^localhost/' || true); do
+    manifest_images | awk -v i="$image" '$2 == i {found = 1} END {exit !found}' || unused="$unused $image"
+  done
+  if [ -n "$unused" ]; then
+    log "removing unused images:$unused"
+    # shellcheck disable=SC2086
+    target "podman rmi $unused" >/dev/null || warn "some unused images could not be removed (still in use?)"
+    changes=$((changes + 1))
+  fi
+  # Untagged leftovers of images that were loaded again under the same name.
+  target "podman image prune -f" >/dev/null 2>&1 || true
+
+  # Startup manifest: what the target starts by itself after a reboot.
+  if [ "$(section startup)" != "$(manifest_digest)" ]; then
+    persist
+    changes=$((changes + 1))
+  fi
+
+  [ "$changes" -gt 0 ] || log "nothing to remove or add"
+  wait_running >/dev/null
+  cmd_check
+}
+
+# Removes the deployment from the target: our workloads, images and files.
+# Ankaios and the workloads of other images (the MQTT broker) stay.
+cmd_reset() {
+  local confirmed="$1" keep name workloads="" images volumes
+  FACTS="$(target_facts)" || fail "could not query the target"
+  keep=" $(base_manifest | awk '/^  [A-Za-z0-9_-]+:[[:space:]]*$/ {n = $1; sub(":", "", n); printf "%s ", n}')"
+  for name in $(section workloads | awk '{print $1}'); do
+    case "$keep" in
+      *" $name "*) ;;
+      *) workloads="$workloads $name" ;;
+    esac
+  done
+  images="$(section images | grep '^localhost/' | tr '\n' ' ' || true)"
+  # Named volumes of the manifest ("--volume=<name>:<path>", no slash in the name).
+  volumes="$(grep -o -- '--volume=[A-Za-z0-9_.-]*:' "$MANIFEST" | sed 's/--volume=//; s/://' | sort -u | tr '\n' ' ' || true)"
+
+  log "reset removes from the target:"
+  log "  workloads:${workloads:- none}"
+  log "  images:    ${images:-none}"
+  log "  volumes:   ${volumes:-none}"
+  log "  files:     $T_DATA  /root/faults.sh"
+  log "  startup manifest: reduced to$keep"
+  log "kept: Ankaios, the workloads listed above as kept, and build/images/ on this machine"
+  if [ "$confirmed" != yes ]; then
+    log "nothing was changed. To do it: $0 reset --yes"
+    return 0
+  fi
+
+  log "free space before: $(target "df -h /var | awk 'NR == 2 {print \$4}'")"
+  # shellcheck disable=SC2086
+  [ -z "$workloads" ] || target "$ANK delete workload $workloads" >/dev/null 2>&1 || true
+  target "rm -rf $T_IOX/* /dev/shm/iox2_* 2>/dev/null; true"
+  # shellcheck disable=SC2086
+  [ -z "$images" ] || target "podman rmi -f $images" >/dev/null || warn "some images could not be removed"
+  # Untagged leftovers of images that were loaded again under the same name.
+  target "podman image prune -f" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2086
+  [ -z "$volumes" ] || target "podman volume rm $volumes" >/dev/null 2>&1 || true
+  target "rm -rf $T_DATA /root/faults.sh"
+  base_manifest | target "cat > $T_STARTUP_MANIFEST"
+  log "free space after:  $(target "df -h /var | awk 'NR == 2 {print \$4}'")"
+  show_status
+  log "reset done. To deploy again: $0"
+}
+
 # ---------------------------------------------------------------- main
+case "${1:-}" in
+  status)       preflight; show_status; exit 0 ;;
+  check)        preflight; cmd_check; exit 0 ;;
+  sync)         preflight; cmd_sync; exit 0 ;;
+  clear-faults) preflight; cmd_clear_faults; exit 0 ;;
+  reset)
+    case "${2:-}" in
+      --yes) preflight; cmd_reset yes ;;
+      "")    preflight; cmd_reset no ;;
+      *)     fail "unknown option for reset: $2" ;;
+    esac
+    exit 0 ;;
+esac
+
 LOAD=1
 PERSIST=1
 for arg in "$@"; do
   case "$arg" in
-    status)      preflight; show_status; exit 0 ;;
-    --no-build)  LOAD=0 ;;
+    --no-build)   LOAD=0 ;;
     --no-persist) PERSIST=0 ;;
     --persist)    PERSIST=1 ;;   # the default; kept for older instructions
-    -h|--help)   usage; exit 0 ;;
-    *)           fail "unknown argument: $arg (try --help)" ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            fail "unknown argument: $arg (try --help)" ;;
   esac
 done
 
@@ -157,7 +419,8 @@ prepare_vm
 apply_manifest
 [ "$PERSIST" -eq 0 ] || persist
 wait_running
-log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/components/battery/faults"
+log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/apps/battery/faults"
+log "          fault monitor: http://$AUTOSD_HOST:7690/ui/"
 if [ "$PERSIST" -eq 1 ]; then
   log "persistent: the workloads start by themselves at every boot"
 else

@@ -5,17 +5,17 @@
 # deploy/build-images.sh and must be loaded on the target before this is applied.
 #
 # Applied to the QEMU image with deploy/deploy-to-autosd.sh: all five
-# workloads reach Running(Ok) and the SOVD interface answers on port 7690.
-# The guardian workload's DFM options were added after that run and have not
-# been applied to an AutoSD system yet.
+# workloads reach Running(Ok). Verified there with the real board:
+# board -> MQTT -> publisher -> Guardian -> DFM -> OpenSOVD gateway.
 #
 # The target must provide (lost on reboot unless recreated, /tmp is a tmpfs):
-#   /tmp/iceoryx2                 iceoryx2 discovery files, shared by guardian, dfm and sovd-bridge
+#   /tmp/iceoryx2                 iceoryx2 discovery files, shared by guardian, dfm and opensovd-gateway
 #   /var/lib/fevengers/catalogs   copy of the repo's catalogs/ folder
+#   /var/lib/fevengers/webui      copy of opensovd-gateway-dfm/webui/ (fault monitor page)
 #
 # Data path:
 #   AZ3166 --MQTT--> mqtt-broker --> vss-publisher --uProtocol/Zenoh--> guardian
-#   guardian --iceoryx2--> dfm <--iceoryx2 "dfm/query"-- sovd-bridge <--HTTP :7690-- tester
+#   guardian --iceoryx2--> dfm <--iceoryx2 "dfm/query"-- opensovd-gateway <--HTTP :7690-- tester
 apiVersion: v1
 workloads:
   # Container 1 (Input Handler), part 1: broker the AZ3166 publishes to.
@@ -66,7 +66,7 @@ workloads:
         - "/catalogs/battery_guardian_catalog.json"
 
   # Container 3: Diagnostic Fault Manager. iceoryx2 is shared-memory IPC, so
-  # dfm, sovd-bridge and every reporter share the host IPC and PID namespaces,
+  # dfm, opensovd-gateway and every reporter share the host IPC and PID namespaces,
   # /dev/shm and /tmp/iceoryx2. label=disable: AutoSD runs SELinux enforcing.
   dfm:
     runtime: podman
@@ -83,16 +83,19 @@ workloads:
         - "--volume=/var/lib/fevengers/catalogs:/catalogs:ro"
         - "--volume=dfm-store:/store"
 
-  # Container 4: SOVD REST interface on the DFM. Listens on 7690, the port
-  # of the architecture diagram, which the QEMU start script forwards to the host.
-  sovd-bridge:
+  # Container 4: OpenSOVD gateway. Serves the DFM's faults on the standard
+  # SOVD path /sovd/v1/apps/battery/faults and the fault monitor page on /ui/.
+  # Port 7690 is the one of the architecture diagram; autosd.sh forwards it to
+  # the host. "--dfm-fault-app battery" must equal the id of the fault catalog.
+  # It replaces the standalone SOVD fault bridge (sovd/sovd-fault-bridge).
+  opensovd-gateway:
     runtime: podman
     agent: agent_A
     restartPolicy: ALWAYS
     dependencies:
       dfm: ADD_COND_RUNNING
     runtimeConfig: |
-      image: localhost/sovd-fault-bridge:dev
+      image: localhost/opensovd-gateway-dfm:dev
       commandOptions:
         - "--net=host"
         - "--ipc=host"
@@ -100,4 +103,5 @@ workloads:
         - "--security-opt=label=disable"
         - "--volume=/dev/shm:/dev/shm"
         - "--volume=/tmp/iceoryx2:/tmp/iceoryx2"
-      commandArgs: ["--listen", "0.0.0.0:7690", "--entities", "battery"]
+        - "--volume=/var/lib/fevengers/webui:/webui:ro"
+      commandArgs: ["--dfm-fault-app", "battery", "--serve-dir", "/ui:/webui"]
