@@ -27,7 +27,7 @@ Code: [`battery-thermal-guardian/`](../battery-thermal-guardian/)
 ```mermaid
 flowchart LR
   AZ[AZ3166 / ThreadX] -->|MQTT over Wi-Fi| MQ[Mosquitto]
-  MQ -->|az3166/telemetry| P[VSS uProtocol Publisher]
+  MQ -->|FEVengers_MQTT/telemetry| P[VSS uProtocol Publisher]
   P -->|uMessage<br/>//vehicle/8001/1/8001| Z[(uTransport<br/>Zenoh)]
   Z --> G[Battery Thermal Guardian]
   G -->|heartbeat · state · fault · mitigation<br/>//vehicle/8002/1/8001…8004| Z2[(uTransport<br/>Zenoh)]
@@ -112,7 +112,7 @@ sent at one message per second:
 
 ```sh
 while IFS= read -r line; do echo "$line"; sleep 1; done < mqtt_log.txt \
-  | docker exec -i mosquitto mosquitto_pub -t az3166/telemetry -l
+  | docker exec -i mosquitto mosquitto_pub -t FEVengers_MQTT/telemetry -l
 ```
 
 A log taken with `mosquitto_sub -v` has the topic in front of each message;

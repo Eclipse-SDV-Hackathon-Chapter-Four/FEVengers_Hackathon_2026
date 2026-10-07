@@ -29,7 +29,7 @@ Code: [`vss-uprotocol-publisher/`](../vss-uprotocol-publisher/)
 ```mermaid
 flowchart LR
   AZ[AZ3166 / ThreadX] -->|MQTT over Wi-Fi| MQ[Mosquitto]
-  MQ -->|az3166/telemetry| P[vss-uprotocol-publisher<br/>subscribe · parse · VSS mapping · uMessage]
+  MQ -->|FEVengers_MQTT/telemetry| P[vss-uprotocol-publisher<br/>subscribe · parse · VSS mapping · uMessage]
   P -->|uMessage JSON<br/>//vehicle/8001/1/8001| Z[(uTransport<br/>Zenoh)]
   Z --> G[Battery Thermal Guardian]
 ```
@@ -58,7 +58,7 @@ The publisher logs `connected to MQTT broker`. Send one reading by hand from
 a second terminal:
 
 ```sh
-docker exec mosquitto mosquitto_pub -t az3166/telemetry \
+docker exec mosquitto mosquitto_pub -t FEVengers_MQTT/telemetry \
   -m '{"temperature_degC": 24.65, "counter": 1}'
 ```
 
@@ -158,7 +158,7 @@ To run it with the Guardian, see
 
 ## Input: MQTT
 
-Topic `az3166/telemetry` (configurable), one JSON object per second:
+Topic `FEVengers_MQTT/telemetry` (configurable), one JSON object per second:
 
 ```json
 {"pressure_hPa":1215.87,"temperature_degC":24.65,"humidity_perc":54.11,

@@ -88,7 +88,7 @@ Differences to those documents:
 | SOVD bridge port | `7690` | Port of the architecture diagram; `7691` is the bridge's own default |
 | Catalog folder on the target | `/var/lib/fevengers/catalogs` | `/var` is the only persistent location in the AutoSD image |
 
-The publisher subscribes to the MQTT topic `az3166/telemetry` on `localhost:1883` (team decision). The board firmware must publish to that same topic; at the time of writing `FEVengersApp/cloud_config.h` still uses `doctorwhodunit/threadx/temperature`.
+The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localhost:1883`. That is the topic the board firmware publishes on (`MQTT_CLIENT_NAME "/telemetry"` with client name `FEVengers_MQTT`, see `Threadx_AZ3166_MQTT_Temp_Source.md`).
 
 ---
 
