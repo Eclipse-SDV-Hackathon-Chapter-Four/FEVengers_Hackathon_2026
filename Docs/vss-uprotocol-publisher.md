@@ -123,11 +123,11 @@ vss-uprotocol-publisher/target/release/vss-sim stuck -c vss-uprotocol-publisher/
 | `nominal` | – | stable ~30 °C | MONITORING, no faults |
 | `overheat` | thermal | ramp to 72 °C, hold, cool down | WARNING → CRITICAL → MITIGATING (`REDUCE_POWER_MAX_COOLING`). demo.toml's 10 s mitigation timeout expires during the hold, so `OCCUPANT_EVACUATION_WARNING` follows; after cooling back to MONITORING, mitigations released |
 | `runaway` | thermal | ramp to 72 °C and keep rising | WARNING → CRITICAL → MITIGATING; every `mitigation_timeout_ms` back to CRITICAL with `OCCUPANT_EVACUATION_WARNING` re-asserted |
-| `stuck` | Signal | value frozen in the fault window | `TempSignalStuck` after `stuck_window_ms` (5 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the value changes again |
+| `stuck` | Signal | the device repeats its last reading in the fault window (rolling counter and value frozen) | `TransportDuplicate`, then `TempSignalStuck` after `stuck_window_ms` (3 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the counter increases again |
 | `spike` | Signal | every 4th sample +40 °C in the fault window | `TempSignalSpike`, spiked samples discarded, state unchanged; cleared after 5 good samples |
-| `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so `TempSourceConnectionLost` after 3 s → DEGRADED |
-| `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next sample |
-| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so `TempSourceConnectionLost` → DEGRADED. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
+| `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so after 3 s DEGRADED because of `TempOutOfRange` |
+| `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next message |
+| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so after 3 s DEGRADED because of `TransportDelay`. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
 | `duplicate` | Transport | every sample sent twice in the fault window | `TransportDuplicate`, duplicates discarded, state unchanged |
 | `reorder` | Transport | consecutive samples swapped in the fault window | `TransportOutOfOrder`, older sample discarded, state unchanged. Only some swapped pairs are detected, see [Current limits](#current-limits) |
 

@@ -378,28 +378,16 @@ fn dropout_degrades_and_recovers_after_trusted_samples() {
     );
 }
 
-// Exactly 31.5 C for 6 s (stuck window shortened to 5 s): STUCK -> DEGRADED.
-// Once the value moves again, the fault clears and monitoring resumes.
+// Exactly 31.5 C for 40 s, but the rolling counter keeps increasing: a steady
+// temperature is not a fault (no value-based stuck detection).
 #[test]
-fn stuck_value_degrades_and_recovers_when_value_moves() {
-    let mut cfg = GuardianConfig::default();
-    cfg.signal.stuck_window_ms = 5000;
-    let mut h = Harness::with(cfg).monitoring();
-    for _ in 0..12 {
+fn constant_value_with_increasing_counter_is_not_stuck() {
+    let mut h = Harness::new().monitoring();
+    for _ in 0..80 {
         h.sample(31.5);
     }
-    assert_eq!(h.guardian.state(), Degraded);
-    assert_eq!(
-        h.faults(),
-        vec![(FaultKind::TempSignalStuck, FaultStatus::Raised)]
-    );
-
-    h.hold(30.0, 3 * PERIOD_MS);
     assert_eq!(h.guardian.state(), Monitoring);
-    assert_eq!(
-        h.faults().last(),
-        Some(&(FaultKind::TempSignalStuck, FaultStatus::Cleared))
-    );
+    assert!(h.faults().is_empty(), "{:?}", h.faults());
 }
 
 // One 200 C sample: rejected (last trusted value stays 30.1), fault raised,
@@ -420,8 +408,9 @@ fn out_of_range_sample_is_rejected_without_state_change() {
     );
 }
 
-// Only 200 C samples: none is accepted, so freshness is never refreshed ->
-// after 3 s STALE -> DEGRADED. Bad data must not keep the Guardian quiet.
+// Only 200 C samples: messages arrive, but none is accepted for 3 s -> the
+// signal is untrusted because of TempOutOfRange -> DEGRADED. Bad data must
+// not keep the Guardian quiet. It is not a connection loss: data arrives.
 #[test]
 fn persistent_out_of_range_ends_in_degraded() {
     let mut h = Harness::new().monitoring();
@@ -429,9 +418,40 @@ fn persistent_out_of_range_ends_in_degraded() {
         h.sample(200.0);
     }
     assert_eq!(h.guardian.state(), Degraded);
-    assert!(h
-        .faults()
-        .contains(&(FaultKind::TempSourceConnectionLost, FaultStatus::Raised)));
+    assert_eq!(
+        h.faults(),
+        vec![(FaultKind::TempOutOfRange, FaultStatus::Raised)]
+    );
+    let degraded = h
+        .events
+        .iter()
+        .find_map(|e| match e {
+            GuardianEvent::State(s) if s.to == Degraded => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    assert!(degraded.reason.contains("TempOutOfRange"), "{}", degraded.reason);
+
+    // Valid samples again: trusted after trust_samples (3).
+    h.hold(30.0, 3 * PERIOD_MS);
+    assert_eq!(h.guardian.state(), Monitoring);
+}
+
+// Only broken payloads: data arrives, so no connection loss, but nothing is
+// accepted -> DEGRADED because of PayloadInvalid.
+#[test]
+fn persistent_invalid_payload_ends_in_degraded() {
+    let mut h = Harness::new().monitoring();
+    for _ in 0..8 {
+        h.advance(PERIOD_MS);
+        let ev = h.guardian.on_invalid_payload("not json".into(), h.now);
+        h.events.extend(ev);
+    }
+    assert_eq!(h.guardian.state(), Degraded);
+    assert_eq!(
+        h.faults(),
+        vec![(FaultKind::PayloadInvalid, FaultStatus::Raised)]
+    );
 }
 
 // 30 -> 90 -> 30: the 90 is not confirmed by the next sample -> spike, ignored.
@@ -654,10 +674,12 @@ fn heartbeat_reports_rolling_counter_of_last_accepted_sample() {
     );
 }
 
-// Device keeps sending but its counter is frozen: every sample is a
-// duplicate, nothing is accepted -> STALE -> DEGRADED.
+// Device keeps sending but its rolling counter is frozen: every sample is a
+// duplicate, and after stuck_window_ms (3 s) STUCK -> DEGRADED. Data arrives,
+// so it is not a connection loss. When the counter moves again, STUCK clears
+// and monitoring resumes after trust_samples valid samples.
 #[test]
-fn frozen_device_counter_ends_in_degraded() {
+fn frozen_device_counter_is_stuck_and_recovers() {
     let mut h = Harness::new().monitoring();
     let counter = h.counter;
     for _ in 0..8 {
@@ -669,9 +691,15 @@ fn frozen_device_counter_ends_in_degraded() {
         h.faults(),
         vec![
             (FaultKind::TransportDuplicate, FaultStatus::Raised),
-            (FaultKind::TempSourceConnectionLost, FaultStatus::Raised),
+            (FaultKind::TempSignalStuck, FaultStatus::Raised),
         ]
     );
+
+    h.hold(30.0, 3 * PERIOD_MS);
+    assert_eq!(h.guardian.state(), Monitoring);
+    assert!(h
+        .faults()
+        .contains(&(FaultKind::TempSignalStuck, FaultStatus::Cleared)));
 }
 
 // Determinism: the same input sequence twice gives exactly the same events.

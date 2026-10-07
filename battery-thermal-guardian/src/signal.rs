@@ -17,10 +17,15 @@
 //! can be trusted and tracks the lifecycle (raised / cleared) of signal and
 //! transport faults.
 //!
-//! Rejected samples never refresh signal freshness, so a persistently faulty
-//! stream (delayed, out of range, spiking, ...) ends up as
-//! TempSourceConnectionLost instead of silently keeping the Guardian in
-//! MONITORING.
+//! Three ways the signal as a whole becomes untrusted (the Guardian then goes
+//! to DEGRADED instead of silently staying in MONITORING):
+//!
+//! - TempSourceConnectionLost: no message at all for `stale_timeout_ms`;
+//! - TempSignalStuck: messages arrive, but the device's rolling counter does
+//!   not increase for `stuck_window_ms` (the device repeats its last reading);
+//! - persistent rejection: messages with new readings arrive, but none is
+//!   accepted for `stale_timeout_ms` (e.g. always out of range or delayed).
+//!   No extra fault: the active per-sample faults are reported as the reason.
 //!
 //! Called by guardian.rs (flow step 3 in `lib.rs`). Like the Guardian core it
 //! has no clock: the current time is always passed in.
@@ -35,16 +40,16 @@
 //! | `check_spike` | TempSignalSpike                            | rate of change vs last accepted value  |
 //!
 //! A sample that passes all of them is *accepted*. Two more faults are not
-//! about a single sample but about the stream: TempSignalStuck (value does
-//! not change, checked on accepted samples) and TempSourceConnectionLost (no
-//! accepted sample for a while, checked on the tick).
+//! about a single sample but about the stream: TempSignalStuck (rolling
+//! counter does not increase, checked on every sample) and
+//! TempSourceConnectionLost (no message for a while, checked on the tick).
 //!
 //! # Fault lifecycle
 //!
 //! A fault is reported once when it appears (Raised). If it happens again
 //! while active, it is not reported again. Per-sample faults clear after
 //! `heal_samples` accepted samples in a row. TempSourceConnectionLost clears
-//! with the next accepted sample, TempSignalStuck when the value changes again.
+//! with the next message, TempSignalStuck when the counter increases again.
 
 use std::collections::BTreeMap;
 
@@ -83,10 +88,11 @@ struct PendingJump {
     confirmations: u32,
 }
 
-/// The value the signal currently "sits on" and since when.
+/// The rolling counter the device currently repeats and since when.
 #[derive(Debug, Clone, Copy)]
 struct StuckTracker {
-    value: f64,
+    counter: u64,
+    /// Guardian time when this counter value first arrived.
     since_ms: u64,
 }
 
@@ -100,8 +106,12 @@ pub struct SignalMonitor {
     last_sent_ms: Option<u64>,
     /// Last sample that passed *all* checks: the value we currently trust.
     last_accepted: Option<Point>,
-    /// Guardian time when `last_accepted` arrived (for staleness).
+    /// Guardian time when `last_accepted` arrived (signal age, persistent rejection).
     last_accepted_rx_ms: Option<u64>,
+    /// Guardian time when the last message of any kind arrived (connection lost).
+    last_rx_ms: Option<u64>,
+    /// Messages arrive but none was accepted for `stale_timeout_ms`.
+    rejecting: bool,
     pending_jump: Option<PendingJump>,
     stuck: Option<StuckTracker>,
     /// Accepted samples in a row; trust needs `trust_samples` of them.
@@ -121,6 +131,8 @@ impl SignalMonitor {
             last_sent_ms: None,
             last_accepted: None,
             last_accepted_rx_ms: None,
+            last_rx_ms: None,
+            rejecting: false,
             pending_jump: None,
             stuck: None,
             valid_streak: 0,
@@ -129,10 +141,10 @@ impl SignalMonitor {
         }
     }
 
-    /// A fault is active that makes the whole signal untrusted.
-    // i.e. STALE or STUCK is active (see FaultKind::disarms_signal).
+    /// The whole signal is untrusted: STALE or STUCK is active (see
+    /// FaultKind::disarms_signal), or no sample has been accepted for a while.
     pub fn is_disarmed(&self) -> bool {
-        self.active.keys().any(|k| k.disarms_signal())
+        self.rejecting || self.active.keys().any(|k| k.disarms_signal())
     }
 
     /// Signal is trusted: not disarmed and enough consecutive valid samples.
@@ -145,11 +157,13 @@ impl SignalMonitor {
         self.active.keys().copied().collect()
     }
 
+    /// The faults that make the signal untrusted (reason for DEGRADED).
+    // While rejecting, every active fault counts: they keep rejecting the samples.
     pub fn disarming_faults(&self) -> Vec<FaultKind> {
         self.active
             .keys()
             .copied()
-            .filter(|k| k.disarms_signal())
+            .filter(|k| self.rejecting || k.disarms_signal())
             .collect()
     }
 
@@ -175,6 +189,10 @@ impl SignalMonitor {
     ) -> (Verdict, Vec<FaultChange>) {
         let mut changes = Vec::new();
         self.counters.received += 1;
+        self.message_received(now_ms, &mut changes);
+        // Stream-level check on every sample: is the device still producing
+        // new readings, i.e. does its rolling counter increase?
+        self.update_stuck(s.rolling_counter, now_ms, &mut changes);
 
         // 1. Order: duplicate or older than what we already have?
         if let Some((kind, detail)) = self.check_order(s, sent_ms) {
@@ -217,22 +235,9 @@ impl SignalMonitor {
         self.counters.accepted += 1;
         self.valid_streak = self.valid_streak.saturating_add(1);
         self.last_accepted = Some(point);
-        // Freshness is only refreshed here, by accepted samples.
         self.last_accepted_rx_ms = Some(now_ms);
+        self.rejecting = false;
 
-        // Data is flowing again -> STALE is over.
-        if self
-            .active
-            .contains_key(&FaultKind::TempSourceConnectionLost)
-        {
-            self.clear(
-                FaultKind::TempSourceConnectionLost,
-                "accepted sample received".into(),
-                &mut changes,
-            );
-        }
-        // Stream-level check that needs accepted values: is the value frozen?
-        self.update_stuck(point, &mut changes);
         // One more good sample for every active per-sample fault.
         self.heal_sample_faults(&mut changes);
 
@@ -240,34 +245,64 @@ impl SignalMonitor {
     }
 
     /// Payload that could not be decoded as a VSS sample.
-    pub fn on_invalid_payload(&mut self, detail: String) -> Vec<FaultChange> {
+    pub fn on_invalid_payload(&mut self, detail: String, now_ms: u64) -> Vec<FaultChange> {
         self.counters.received += 1;
+        let mut changes = Vec::new();
+        self.message_received(now_ms, &mut changes);
         // `.1` = only the fault changes; the verdict is not needed here.
-        self.reject(FaultKind::PayloadInvalid, detail, Vec::new()).1
+        self.reject(FaultKind::PayloadInvalid, detail, changes).1
     }
 
-    /// Time-driven supervision: detects a missing stream.
+    /// Time-driven supervision: detects a missing stream and a stream that
+    /// only brings rejected samples.
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<FaultChange> {
         let mut changes = Vec::new();
-        // Age of the last accepted sample; before the first one, time since start.
-        let reference = self.last_accepted_rx_ms.unwrap_or(self.start_ms);
-        let age = now_ms.saturating_sub(reference);
-        if age >= self.cfg.stale_timeout_ms
-            && !self
-                .active
-                .contains_key(&FaultKind::TempSourceConnectionLost)
-        {
-            let detail = match self.last_accepted_rx_ms {
-                Some(_) => format!("no accepted sample for {age} ms"),
-                None => format!("no accepted sample since start ({age} ms)"),
+        let connection_lost = self
+            .active
+            .contains_key(&FaultKind::TempSourceConnectionLost);
+
+        // No message at all; before the first one, time since start.
+        let rx_age = now_ms.saturating_sub(self.last_rx_ms.unwrap_or(self.start_ms));
+        if rx_age >= self.cfg.stale_timeout_ms && !connection_lost {
+            let detail = match self.last_rx_ms {
+                Some(_) => format!("no message for {rx_age} ms"),
+                None => format!("no message since start ({rx_age} ms)"),
             };
             self.raise(FaultKind::TempSourceConnectionLost, detail, &mut changes);
-            // Trust has to be re-earned once samples arrive again.
-            self.valid_streak = 0;
+            self.lose_trust();
             self.stuck = None;
-            self.pending_jump = None;
+            return changes;
+        }
+
+        // Messages arrive, but none was accepted: the faults that keep
+        // rejecting them make the signal untrusted.
+        let accepted_age =
+            now_ms.saturating_sub(self.last_accepted_rx_ms.unwrap_or(self.start_ms));
+        if !self.rejecting
+            && !connection_lost
+            && accepted_age >= self.cfg.stale_timeout_ms
+            && !self.active.is_empty()
+        {
+            self.rejecting = true;
+            self.lose_trust();
         }
         changes
+    }
+
+    /// Any message (sample or invalid payload) arrived: the source is there.
+    fn message_received(&mut self, now_ms: u64, changes: &mut Vec<FaultChange>) {
+        self.last_rx_ms = Some(now_ms);
+        self.clear(
+            FaultKind::TempSourceConnectionLost,
+            "message received".into(),
+            changes,
+        );
+    }
+
+    /// Trust has to be re-earned with `trust_samples` new valid samples.
+    fn lose_trust(&mut self) {
+        self.valid_streak = 0;
+        self.pending_jump = None;
     }
 
     /// Duplicate / reordering check based on the device's rolling counter
@@ -356,35 +391,37 @@ impl SignalMonitor {
         ))
     }
 
-    /// Raises TempSignalStuck when the value stays the same for `stuck_window_ms`,
-    /// clears it when the value moves again.
-    fn update_stuck(&mut self, point: Point, changes: &mut Vec<FaultChange>) {
+    /// Raises TempSignalStuck when the device's rolling counter does not
+    /// increase for `stuck_window_ms` (it keeps sending its last reading),
+    /// clears it when the counter moves again.
+    // Every repeated sample is also rejected as TransportDuplicate; a single
+    // repeat (e.g. an MQTT re-delivery) does not last long enough for STUCK.
+    fn update_stuck(&mut self, counter: u64, now_ms: u64, changes: &mut Vec<FaultChange>) {
         if self.cfg.stuck_window_ms == 0 {
             return; // stuck detection disabled
         }
+        let counter = counter % self.cfg.counter_modulus;
         match self.stuck {
-            // Same value as before (within epsilon): how long already?
-            Some(t) if (point.value - t.value).abs() <= self.cfg.stuck_epsilon_c => {
-                let unchanged_ms = point.sent_ms.saturating_sub(t.since_ms);
-                if unchanged_ms >= self.cfg.stuck_window_ms
-                    && !self.active.contains_key(&FaultKind::TempSignalStuck)
-                {
-                    let detail = format!("value {} unchanged for {unchanged_ms} ms", t.value);
+            // Same counter as before: how long already?
+            Some(t) if t.counter == counter => {
+                let frozen_ms = now_ms.saturating_sub(t.since_ms);
+                if frozen_ms >= self.cfg.stuck_window_ms {
+                    let detail = format!("rolling counter {counter} not increasing for {frozen_ms} ms");
                     self.raise(FaultKind::TempSignalStuck, detail, changes);
                 }
             }
-            // First sample, or the value changed: start watching the new value.
+            // First sample, or the counter moved: watch the new value.
             _ => {
                 self.stuck = Some(StuckTracker {
-                    value: point.value,
-                    since_ms: point.sent_ms,
+                    counter,
+                    since_ms: now_ms,
                 });
                 if self.active.contains_key(&FaultKind::TempSignalStuck) {
                     // Samples during the stuck phase do not count towards trust.
-                    self.valid_streak = 1;
+                    self.valid_streak = 0;
                     self.clear(
                         FaultKind::TempSignalStuck,
-                        "value changes again".into(),
+                        "rolling counter increases again".into(),
                         changes,
                     );
                 }
