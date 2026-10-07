@@ -29,8 +29,9 @@ All services are compiled inside containers, so the host needs no Rust toolchain
 ## 2. Build
 
 ```bash
-./deploy/build-images.sh               # all services
+./deploy/build-images.sh               # the services that get deployed
 ./deploy/build-images.sh guardian dfm  # only these (name or unique part of it)
+./deploy/build-images.sh --all         # also the services marked optional
 ./deploy/build-images.sh --list        # show services and image names
 ./deploy/build-images.sh --no-save     # build without writing the archives
 ```
@@ -41,11 +42,10 @@ All services are compiled inside containers, so the host needs no Rust toolchain
 | Battery Thermal Guardian | `localhost/battery-thermal-guardian:dev` | `battery-thermal-guardian/` |
 | DFM | `localhost/dfm:dev` | `dfm-container/` |
 | OpenSOVD gateway | `localhost/opensovd-gateway-dfm:dev` | `opensovd-gateway-dfm/` |
-| SOVD fault bridge (replaced by the gateway, kept as a fallback) | `localhost/sovd-fault-bridge:dev` | `sovd/sovd-fault-bridge/` |
-| Fault campaign runner (skeleton) | `localhost/fault-campaign-runner:dev` | `fault-campaign-runner/` |
-| Evidence collector (skeleton) | `localhost/evidence-collector:dev` | `evidence-collector/` |
+| Fault campaign runner (skeleton, optional) | `localhost/fault-campaign-runner:dev` | `fault-campaign-runner/` |
+| Evidence collector (skeleton, optional) | `localhost/evidence-collector:dev` | `evidence-collector/` |
 
-The two skeletons are empty Rust programs: they build and print `not implemented yet`, nothing more. They are in the build so the pipeline already covers them; `src/main.rs` in each lists what is to be implemented. They are not in the Ankaios manifest.
+The two skeletons are empty Rust programs: they build and print `not implemented yet`, nothing more; `src/main.rs` in each lists what is to be implemented. They are marked `optional` in the table: built only when named (`./deploy/build-images.sh evidence`) or with `--all`, because they are not deployed yet. The old SOVD fault bridge (`sovd/sovd-fault-bridge/`) is no longer built; the OpenSOVD gateway replaced it.
 
 The MQTT broker is not built; it is the stock `docker.io/library/eclipse-mosquitto:2`.
 
@@ -73,6 +73,8 @@ Add one line to the `SERVICES` table at the top of `deploy/build-images.sh`:
 ```
 <image name>|<folder with the Containerfile, relative to the repo root>
 ```
+
+Append `|optional` to the line for a service that is not deployed yet.
 
 Then add a workload for it to `deploy/ankaios-manifest.yaml`.
 
@@ -138,8 +140,9 @@ Connection settings, shared by `setup-autosd.sh` and `deploy-to-autosd.sh`:
 ## 6. Deploy
 
 ```bash
-./deploy/deploy-to-autosd.sh               # load the images, start the workloads, keep them across reboots
-./deploy/deploy-to-autosd.sh --no-build    # same, without loading the images again (they are already on the target)
+./deploy/deploy-to-autosd.sh               # load the images that changed, restart their workloads, keep it across reboots
+./deploy/deploy-to-autosd.sh --restart     # also restart the workloads whose image did not change
+./deploy/deploy-to-autosd.sh --no-build    # never load an image, even if the archive is newer
 ./deploy/deploy-to-autosd.sh --no-persist  # start the workloads for this boot only
 ./deploy/deploy-to-autosd.sh status        # show the Ankaios workloads
 ./deploy/deploy-to-autosd.sh check         # compare the target with the manifest; changes nothing
@@ -153,7 +156,7 @@ Maintenance commands, all run on the laptop:
 
 | Command | What it does |
 |---|---|
-| `check` | For every workload of the manifest: is it `Running(Ok)`, is its image stored on the target. Also reports workloads that run on the target but are not in the manifest, our images that nothing uses, and a startup manifest that differs from the manifest. Exits non-zero on a difference |
+| `check` | For every workload of the manifest: is it `Running(Ok)`, and is its image `stored`, `outdated` (the archive in `build/images/` holds another build than the target runs) or `missing`. Also reports workloads that run on the target but are not in the manifest, our images that nothing uses, and a startup manifest that differs from the manifest. Exits non-zero on a difference |
 | `sync` | Makes the target match the manifest with as little change as possible: deletes workloads that are not in the manifest, loads our images that are missing, starts workloads that are missing or not running, removes our images that nothing uses, refreshes the catalog and web page, and rewrites the startup manifest if it differs. Running workloads are not restarted and stored images are not loaded again, so it does not pick up a rebuilt image: use the plain deploy for that |
 | `clear-faults` | `DELETE` on `/sovd/v1/apps/<app>/faults` through the OpenSOVD gateway, then prints the fault table. The app id is the `--dfm-fault-app` of the manifest |
 | `reset` | Removes the workloads that run our images, all `localhost/*` images, the named volumes of the manifest, `/var/lib/fevengers` and `/root/faults.sh`, and reduces the startup manifest to the workloads of other images (the MQTT broker). Ankaios and `build/images/` on the laptop stay. Needs `--yes`; without it nothing is changed |
@@ -162,10 +165,10 @@ What it does, in order:
 
 | Step | Detail |
 |---|---|
-| Load images | Every `localhost/*` image named in the manifest, streamed from `build/images/` over SSH into `podman load` |
+| Load images | Only the `localhost/*` images whose archive in `build/images/` holds another build than the target has stored. The image id is read from the archive with `tar` and compared with the id on the target, so nothing is transferred when nothing changed |
 | Prepare the target | Creates `/tmp/iceoryx2`, copies `catalogs/*.json` to `/var/lib/fevengers/catalogs`, the fault monitor page (`opensovd-gateway-dfm/webui/`) to `/var/lib/fevengers/webui` and the fault table script to `/root/faults.sh` |
 | Remove what left the manifest | Workloads running on the target that the manifest no longer lists are deleted (for example the SOVD fault bridge after the gateway replaced it) |
-| Restart workloads | Deletes the workloads that use our images, clears stale iceoryx2 files, applies the manifest. Other workloads of the manifest (the MQTT broker) keep running |
+| Restart workloads | Only the workloads of the images that were loaded, plus any of ours that exist but do not run. If one of them is a workload others depend on (the DFM), all of ours restart and stale iceoryx2 files are cleared, because the others hold connections to the old instance. Then the manifest is applied, which starts what is missing. `--restart` restarts all of ours regardless |
 | Wait | Up to 60 s until every workload is `Running(Ok)`; fails otherwise |
 
 The deployment is persistent by default, so the workloads start by themselves at every boot:
@@ -183,7 +186,7 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 
 | Item | State |
 |---|---|
-| `build-images.sh` with Podman 3.4.4 on Ubuntu 22.04 (x86_64) | All six images built and saved; each started once with `--help` (skeletons: plain run) |
+| `build-images.sh` with Podman 3.4.4 on Ubuntu 22.04 (x86_64) | All images built and saved; each started once with `--help` (skeletons: plain run). Default set with everything cached: 25 s. An optional service by name builds; a removed one is refused |
 | First full build, empty cache | About 18 minutes for the four real services |
 | `install-build-deps.sh`, engine already present | Run: detects Podman and changes nothing |
 | `install-build-deps.sh`, install paths (apt / dnf / pacman / brew) | Not tested |
@@ -202,5 +205,11 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `clear-faults` | Run: counters 15 / 9 / 2 back to 0, table printed |
 | `reset --yes` | Run: four workloads, their images, the `dfm-store` volume and `/var/lib/fevengers` removed; the broker kept running and the board stayed connected |
 | `sync` | Run three ways: on a healthy target (removes only the unused bridge image), again (nothing to do), and after a reset (loads four images, starts four workloads, restores files and startup manifest) |
+| Deploy with nothing changed | Run: loads nothing, restarts nothing, 3 s |
+| Deploy after only the Guardian image changed | Run: loads and restarts only `guardian` (4 s); it reconnects to the running DFM at once |
+| Deploy after only the publisher image changed | Run: loads and restarts only `vss-publisher`; the Guardian stays in `MONITORING` |
+| Deploy after the DFM image changed | Run: loads the DFM and restarts all four of ours (16 s) |
+| `--restart` with nothing changed | Run: loads nothing, restarts all four |
+| `check` with a newer archive than the target runs | Run: reports `outdated` and exits non-zero |
 | Restart of the image with the gateway in the startup manifest | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |

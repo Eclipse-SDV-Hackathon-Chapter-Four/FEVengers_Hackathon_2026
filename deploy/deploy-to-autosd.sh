@@ -3,8 +3,10 @@
 #
 # deploy-to-autosd.sh - load the images into a running AutoSD system and start them with Ankaios.
 #
-#   ./deploy/deploy-to-autosd.sh               load the images, start the workloads, keep them across reboots
-#   ./deploy/deploy-to-autosd.sh --no-build    same, without loading the images again (they are already on the target)
+#   ./deploy/deploy-to-autosd.sh               load the images that changed, restart their workloads,
+#                                              keep everything across reboots
+#   ./deploy/deploy-to-autosd.sh --restart     also restart the workloads whose image did not change
+#   ./deploy/deploy-to-autosd.sh --no-build    never load an image, even if the archive is newer
 #   ./deploy/deploy-to-autosd.sh --no-persist  start the workloads for this boot only
 #   ./deploy/deploy-to-autosd.sh status        show the Ankaios workloads on the target
 #   ./deploy/deploy-to-autosd.sh check         compare the target with the manifest, name by name; changes nothing
@@ -17,10 +19,12 @@
 # The deployment is persistent: the manifest becomes the Ankaios startup
 # manifest on the target, so the workloads start by themselves at every boot.
 #
-# Run ./deploy/build-images.sh first. Only the localhost/* images named in the
-# manifest are loaded; workloads that use them are restarted, other workloads
-# of the manifest (e.g. the MQTT broker) are left running, and workloads on
-# the target that the manifest does not list are removed.
+# Run ./deploy/build-images.sh first. An image is loaded only if the archive
+# in build/images/ holds another build than the target has stored; only the
+# workloads of loaded images are restarted (all of ours if one of them is a
+# workload that others depend on, such as the DFM). Workloads of other images
+# (the MQTT broker) are left running, and workloads on the target that the
+# manifest does not list are removed.
 #
 # The target is reached over SSH. Default is the QEMU image on this machine
 # (127.0.0.1:2222, no IP needed); for a device on the network set AUTOSD_HOST
@@ -50,7 +54,7 @@ T_WEBUI=$T_DATA/webui
 # Fault table for the terminal, used on the target as "watch -n 1 /root/faults.sh".
 FAULTS_SCRIPT="$REPO/opensovd-gateway-dfm/faults.sh"
 
-usage() { sed -n '4,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,37p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------- manifest
 # Prints "workload image" for every workload of the manifest.
@@ -70,6 +74,22 @@ archive_of() {   # localhost/<name>:<tag> -> <IMAGES_DIR>/<name>.tar
   echo "$IMAGES_DIR/${name%%:*}.tar"
 }
 
+# Id of the image inside an archive written by "podman save" / "docker save":
+# the name of its config blob. Read with tar, so no container engine is needed.
+archive_id() {
+  tar -xOf "$1" manifest.json 2>/dev/null | tr -d ' \n' \
+    | sed -n 's/.*"Config":"\([^"]*\)".*/\1/p' | sed 's|.*/||; s|\.json$||'
+}
+
+# Names of the images stored on the target, and the id of one of them (from $FACTS).
+target_images()   { section images | awk '{print $1}'; }
+target_image_id() { section images | awk -v i="$1" '$1 == i {sub("^sha256:", "", $2); print $2; exit}'; }
+
+# Workloads that other workloads depend on ("dependencies:" in the manifest).
+dependency_targets() {
+  awk '/^      [A-Za-z0-9_-]+:[[:space:]]*ADD_COND/ {n = $1; sub(":", "", n); print n}' "$MANIFEST" | sort -u
+}
+
 # ---------------------------------------------------------------- steps
 preflight() {
   [ -f "$MANIFEST" ] || fail "manifest not found: $MANIFEST"
@@ -80,17 +100,27 @@ preflight() {
     || fail "Ankaios is not installed or not running on the target. Run ./deploy/setup-autosd.sh"
 }
 
+# Loads the images whose archive holds another build than the target has
+# stored. Sets CHANGED_IMAGES to the images that were loaded. Needs $FACTS.
 load_images() {
-  local image tar
+  local image tar want have
+  CHANGED_IMAGES=""
   for image in $(own_images); do
     tar="$(archive_of "$image")"
     [ -f "$tar" ] || fail "$image: archive missing ($tar). Run ./deploy/build-images.sh"
   done
   for image in $(own_images); do
     tar="$(archive_of "$image")"
+    want="$(archive_id "$tar")"
+    have="$(target_image_id "$image")"
+    if [ -n "$want" ] && [ "$want" = "$have" ]; then
+      log "up to date, not loaded: $image"
+      continue
+    fi
     log "loading $image ($(du -h "$tar" | cut -f1))"
     # Streamed over SSH: nothing is stored twice on the target's small disk.
     target 'podman load -q >/dev/null' <"$tar" || fail "$image: podman load failed on the target"
+    CHANGED_IMAGES="$CHANGED_IMAGES $image"
   done
 }
 
@@ -112,11 +142,11 @@ prepare_vm() {
 }
 
 # Workloads running on the target that the manifest no longer lists (e.g. a
-# service that was replaced). "ank apply" would leave them running.
+# service that was replaced). "ank apply" would leave them running. Needs $FACTS.
 stale_workloads() {
   local name wanted
   wanted=" $(manifest_images | awk '{print $1}' | tr '\n' ' ')"
-  for name in $(target "$ANK get workloads" | awk 'NR > 1 {print $1}'); do
+  for name in $(section workloads | awk '{print $1}'); do
     case "$wanted" in
       *" $name "*) ;;
       *) echo "$name" ;;
@@ -124,9 +154,11 @@ stale_workloads() {
   done
 }
 
+# Removes stale workloads, restarts the workloads that need it and applies
+# the manifest. Needs $FACTS, $CHANGED_IMAGES and $RESTART_ALL.
 apply_manifest() {
-  local workloads stale
-  workloads="$(own_workloads | tr '\n' ' ')"
+  local stale name image state dep restart="" all
+  all="$(own_workloads | tr '\n' ' ')"
   stale="$(stale_workloads | tr '\n' ' ')"
   # The manifest is the whole desired state: what it does not list is removed.
   if [ -n "$stale" ]; then
@@ -134,14 +166,41 @@ apply_manifest() {
     # shellcheck disable=SC2086
     target "$ANK delete workload $stale" >/dev/null 2>&1 || true
   fi
-  # Ankaios leaves an unchanged workload alone, so a new image would not be
-  # picked up: delete our workloads first, then apply the whole manifest.
-  log "restarting workloads: $workloads"
-  # shellcheck disable=SC2086
-  target "$ANK delete workload $workloads" >/dev/null 2>&1 || true
-  # Stale iceoryx2 files of the old containers make the new ones time out.
-  target "rm -rf $T_IOX/* /dev/shm/iox2_* 2>/dev/null; true"
-  target "$ANK apply -" <"$MANIFEST" || fail "ank apply failed"
+
+  # Ankaios leaves an unchanged workload alone, so a new image is not picked
+  # up by "ank apply": the workloads of loaded images are deleted first. So
+  # is a workload that exists but does not run.
+  while read -r name image; do
+    case "$image" in localhost/*) ;; *) continue ;; esac
+    state="$(section workloads | awk -v n="$name" '$1 == n {print $2}')"
+    case " $CHANGED_IMAGES " in *" $image "*) restart="$restart$name "; continue ;; esac
+    if [ "$RESTART_ALL" -eq 1 ] || { [ -n "$state" ] && [ "$state" != "Running(Ok)" ]; }; then
+      restart="$restart$name "
+    fi
+  done <<EOF
+$(manifest_images)
+EOF
+  # A workload that others depend on (the DFM) takes its peers with it: they
+  # hold iceoryx2 connections to the instance that goes away.
+  for dep in $(dependency_targets); do
+    case " $restart" in *" $dep "*) restart="$all" ;; esac
+  done
+
+  if [ -n "$restart" ]; then
+    log "restarting workloads: $restart"
+    # shellcheck disable=SC2086
+    target "$ANK delete workload $restart" >/dev/null 2>&1 || true
+    if [ "$restart" = "$all" ]; then
+      # All iceoryx2 users are down: stale files of the old containers would
+      # make the new ones time out.
+      target "rm -rf $T_IOX/* /dev/shm/iox2_* 2>/dev/null; true"
+    fi
+  else
+    log "no workload needs a restart"
+  fi
+  # Starts what is missing and updates a workload whose definition changed.
+  # ank prints a progress table per state change; the final table follows below.
+  target "$ANK apply -" <"$MANIFEST" >/dev/null || fail "ank apply failed"
 }
 
 persist() {
@@ -180,12 +239,12 @@ wait_running() {
 
 # ---------------------------------------------------------------- maintenance
 # What the target reports, fetched in one SSH call: workloads with their
-# state, stored images and the checksum of the startup manifest (without
+# state, stored images with their ids and the checksum of the startup manifest (without
 # comments and blank lines, see manifest_digest).
 target_facts() {
   target "
     echo '== workloads'; $ANK get workloads | awk 'NR > 1 {print \$1, \$4}'
-    echo '== images'; podman images --format '{{.Repository}}:{{.Tag}}'
+    echo '== images'; podman images --no-trunc --format '{{.Repository}}:{{.Tag}} {{.Id}}'
     echo '== startup'; sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*\$/d' $T_STARTUP_MANIFEST 2>/dev/null | sha256sum | cut -d' ' -f1
   "
 }
@@ -216,13 +275,25 @@ base_manifest() {
 
 # Compares the target with the manifest, workload by workload. Changes nothing.
 cmd_check() {
-  local name image state stored problems=0 used
+  local name image state stored have want tar problems=0 outdated=0 used
   FACTS="$(target_facts)" || fail "could not query the target"
   printf '%-18s %-14s %-9s %s\n' WORKLOAD STATE IMAGE "(image)"
   while read -r name image; do
     state="$(section workloads | awk -v n="$name" '$1 == n {print $2}')"
     stored=missing
-    section images | grep -qxF "$image" && stored=stored
+    have="$(target_image_id "$image")"
+    if [ -n "$have" ]; then
+      stored=stored
+      # One of ours: is it the build that lies in build/images/?
+      tar="$(archive_of "$image")"
+      case "$image" in
+        localhost/*)
+          if [ -f "$tar" ]; then
+            want="$(archive_id "$tar")"
+            if [ -n "$want" ] && [ "$want" != "$have" ]; then stored=outdated; outdated=1; fi
+          fi ;;
+      esac
+    fi
     printf '%-18s %-14s %-9s %s\n' "$name" "${state:-missing}" "$stored" "$image"
     { [ "$state" = "Running(Ok)" ] && [ "$stored" = stored ]; } || problems=$((problems + 1))
   done <<EOF
@@ -238,7 +309,7 @@ EOF
 
   # Our images on the target that no workload of the manifest uses: only disk space.
   used="$(manifest_images | awk '{print $2}')"
-  for image in $(section images | grep '^localhost/' || true); do
+  for image in $(target_images | grep '^localhost/' || true); do
     printf '%s\n' "$used" | grep -qxF "$image" && continue
     log "unused image on the target: $image (remove: podman rmi $image)"
   done
@@ -248,6 +319,7 @@ EOF
     problems=$((problems + 1))
   fi
 
+  [ "$outdated" -eq 0 ] || warn "outdated: build/images/ holds a newer build than the target runs (fix: $0)"
   [ "$problems" -eq 0 ] || fail "$problems difference(s) between the target and the manifest"
   log "ok: the target matches the manifest"
 }
@@ -287,7 +359,7 @@ cmd_sync() {
 
   # Our images that the manifest needs but the target does not have.
   for image in $(own_images); do
-    section images | grep -qxF "$image" && continue
+    [ -z "$(target_image_id "$image")" ] || continue
     tar="$(archive_of "$image")"
     [ -f "$tar" ] || fail "$image is missing on the target and has no archive ($tar). Run ./deploy/build-images.sh"
     log "loading missing image $image ($(du -h "$tar" | cut -f1))"
@@ -318,7 +390,7 @@ EOF
   fi
 
   # Our images on the target that no workload of the manifest uses.
-  for image in $(section images | grep '^localhost/' || true); do
+  for image in $(target_images | grep '^localhost/' || true); do
     manifest_images | awk -v i="$image" '$2 == i {found = 1} END {exit !found}' || unused="$unused $image"
   done
   if [ -n "$unused" ]; then
@@ -353,7 +425,7 @@ cmd_reset() {
       *) workloads="$workloads $name" ;;
     esac
   done
-  images="$(section images | grep '^localhost/' | tr '\n' ' ' || true)"
+  images="$(target_images | grep '^localhost/' | tr '\n' ' ' || true)"
   # Named volumes of the manifest ("--volume=<name>:<path>", no slash in the name).
   volumes="$(grep -o -- '--volume=[A-Za-z0-9_.-]*:' "$MANIFEST" | sed 's/--volume=//; s/://' | sort -u | tr '\n' ' ' || true)"
 
@@ -403,9 +475,12 @@ esac
 
 LOAD=1
 PERSIST=1
+RESTART_ALL=0
+CHANGED_IMAGES=""
 for arg in "$@"; do
   case "$arg" in
     --no-build)   LOAD=0 ;;
+    --restart)    RESTART_ALL=1 ;;
     --no-persist) PERSIST=0 ;;
     --persist)    PERSIST=1 ;;   # the default; kept for older instructions
     -h|--help)    usage; exit 0 ;;
@@ -414,6 +489,7 @@ for arg in "$@"; do
 done
 
 preflight
+FACTS="$(target_facts)" || fail "could not query the target"
 [ "$LOAD" -eq 0 ] || load_images
 prepare_vm
 apply_manifest
