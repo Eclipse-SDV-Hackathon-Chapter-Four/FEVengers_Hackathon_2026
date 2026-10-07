@@ -1,0 +1,602 @@
+diff --git a/MXChip/AZ3166/app/mqtt/cloud_config.h b/MXChip/AZ3166/app/mqtt/cloud_config.h
+index 5e24cdc..b73fb37 100644
+--- a/MXChip/AZ3166/app/mqtt/cloud_config.h
++++ b/MXChip/AZ3166/app/mqtt/cloud_config.h
+@@ -29,17 +29,17 @@ typedef enum
+ // ----------------------------------------------------------------------------
+ // WiFi connection config
+ // ----------------------------------------------------------------------------
+-#define HOSTNAME      "eclipse-threadx"  //Change to unique hostname.
+-#define WIFI_SSID     "<redacted>"
+-#define WIFI_PASSWORD "<redacted>" 
++#define HOSTNAME      "sdv-hackathon_FEVengers"  //Change to unique hostname.
++#define WIFI_SSID     "<redacted>"
++#define WIFI_PASSWORD "<redacted>"
+ #define WIFI_MODE     WPA2_PSK_AES
+ 
+ // ----------------------------------------------------------------------------
+ // MQTT Config
+ // ----------------------------------------------------------------------------
+-#define MQTT_CLIENT_NAME     "ThreadXAZ3166" //Change to unique name.
++#define MQTT_CLIENT_NAME     "FEVengers_MQTT" //Change to unique name.
+ // Use test.mosquitto.org in a pinch.
+-#define MQTT_LOCAL_BROKER_IP (IP_ADDRESS(5, 196, 78, 28))
++#define MQTT_LOCAL_BROKER_IP (IP_ADDRESS(192, 168, 88, 99))
+ #define MQTT_SUBSCRIBE_TOPIC MQTT_CLIENT_NAME "/incoming" 
+ #define MQTT_PUBLISH_TOPIC   MQTT_CLIENT_NAME "/telemetry" 
+ 
+diff --git a/MXChip/AZ3166/app/mqtt/main.c b/MXChip/AZ3166/app/mqtt/main.c
+index 65afdc6..e0cd179 100644
+--- a/MXChip/AZ3166/app/mqtt/main.c
++++ b/MXChip/AZ3166/app/mqtt/main.c
+@@ -39,15 +39,23 @@ TX_EVENT_FLAGS_GROUP mqtt_app_flag;
+ TX_BYTE_POOL byte_pool;
+ TX_THREAD telemetry_thread;
+ TX_THREAD mqtt_thread;
++TX_THREAD display_thread;
+ ULONG telemetry_thread_stack[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
+ ULONG mqtt_thread_stack[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
+-TX_EVENT_FLAGS_GROUP mqtt_app_flag;
++ULONG display_thread_stack[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
+ 
+ void tx_application_define(void* first_unused_memory)
+ {
+     systick_interval_set(TX_TIMER_TICKS_PER_SECOND);
+     CHAR *pointer;
+ 
++    UINT status = tx_event_flags_create(&mqtt_app_flag, "MQTT event");
++    if (status != TX_SUCCESS)
++    {
++        printf("ERROR: MQTT event flags creation failed\r\n");
++        return;
++    }
++
+     /* Allocate the message queue. */
+     tx_byte_allocate(&byte_pool, (VOID **)&pointer, QUEUE_SIZE*sizeof(ULONG), TX_NO_WAIT);
+ 
+@@ -55,7 +63,7 @@ void tx_application_define(void* first_unused_memory)
+     tx_queue_create(&mqtt_queue, "Shared queue", TX_1_ULONG, pointer, QUEUE_SIZE*sizeof(ULONG));
+ 
+     // Create Telemetry thread
+-    UINT status = tx_thread_create(&telemetry_thread,
++    status = tx_thread_create(&telemetry_thread,
+         "Eclipse ThreadX telemetry Thread",
+         telemetry_thread_entry,
+         0,
+@@ -86,7 +94,24 @@ void tx_application_define(void* first_unused_memory)
+     if (status != TX_SUCCESS)
+     {
+         printf("ERROR: Eclipse ThreadX MQTT thread creation failed\r\n");
+-    }}
++    }
++
++    status = tx_thread_create(&display_thread,
++        "Eclipse ThreadX display Thread",
++        display_thread_entry,
++        0,
++        display_thread_stack,
++        ECLIPSETX_THREAD_STACK_SIZE,
++        ECLIPSETX_THREAD_PRIORITY,
++        ECLIPSETX_THREAD_PRIORITY,
++        TX_NO_TIME_SLICE,
++        TX_AUTO_START);
++
++    if (status != TX_SUCCESS)
++    {
++        printf("ERROR: Eclipse ThreadX display thread creation failed\r\n");
++    }
++}
+ 
+ int main(void)
+ {
+diff --git a/MXChip/AZ3166/app/mqtt/mqtt_client.c b/MXChip/AZ3166/app/mqtt/mqtt_client.c
+index 9428007..8592424 100644
+--- a/MXChip/AZ3166/app/mqtt/mqtt_client.c
++++ b/MXChip/AZ3166/app/mqtt/mqtt_client.c
+@@ -11,8 +11,11 @@
+  *     Frédéric Desbiens - Initial version.
+  */
+ #include "cloud_config.h"
++#include "board_init.h"
+ #include "mqtt_client.h"
++#include "nanoprintf.h"
+ #include "nx_api.h"
++#include "ssd1306.h"
+ #include "telemetry.h"
+ #include "wwd_networking.h"
+ 
+@@ -33,20 +36,265 @@ static UCHAR topic_buffer[NXD_MQTT_MAX_TOPIC_NAME_LENGTH];
+ /* Declare the MQTT client control block. */
+ static NXD_MQTT_CLIENT mqtt_client;
+ 
++typedef enum
++{
++    DISPLAY_WIFI_INITIALIZING,
++    DISPLAY_WIFI_CONNECTING,
++    DISPLAY_WIFI_CONNECTED,
++    DISPLAY_WIFI_FAILED,
++    DISPLAY_WIFI_SETUP_FAILED
++} display_wifi_status_t;
++
++typedef enum
++{
++    DISPLAY_MQTT_WAITING,
++    DISPLAY_MQTT_CONNECTING,
++    DISPLAY_MQTT_CONNECTED,
++    DISPLAY_MQTT_DISCONNECTED,
++    DISPLAY_MQTT_CONNECT_FAILED,
++    DISPLAY_MQTT_SUBSCRIBE_FAILED,
++    DISPLAY_MQTT_UNAVAILABLE
++} display_mqtt_status_t;
++
++static volatile display_wifi_status_t wifi_display_status = DISPLAY_WIFI_INITIALIZING;
++static volatile display_mqtt_status_t mqtt_display_status = DISPLAY_MQTT_WAITING;
++static volatile UINT button_a_pressed;
++static volatile UINT button_b_pressed;
++static volatile uint8_t rolling_counter;
++static volatile float published_temperature_degC;
++
++static void set_rgb_led(UINT red, UINT green, UINT blue)
++{
++    RGB_LED_SET_R(red);
++    RGB_LED_SET_G(green);
++    RGB_LED_SET_B(blue);
++}
++
++typedef enum
++{
++    TEMPERATURE_LIVE,
++    TEMPERATURE_MAX,
++    TEMPERATURE_FROZEN,
++    TEMPERATURE_BOTH_BUTTONS
++} temperature_mode_t;
++
++static char *wifi_status_text(display_wifi_status_t status)
++{
++    switch (status)
++    {
++        case DISPLAY_WIFI_CONNECTING:
++            return "WiFi: connecting";
++        case DISPLAY_WIFI_CONNECTED:
++            return "WiFi: connected";
++        case DISPLAY_WIFI_FAILED:
++            return "WiFi: init failed";
++        case DISPLAY_WIFI_SETUP_FAILED:
++            return "WiFi: setup failed";
++        case DISPLAY_WIFI_INITIALIZING:
++        default:
++            return "WiFi: initializing";
++    }
++}
++
++static char *mqtt_status_text(display_mqtt_status_t status)
++{
++    switch (status)
++    {
++        case DISPLAY_MQTT_CONNECTING:
++            return "MQTT: connecting";
++        case DISPLAY_MQTT_CONNECTED:
++            return "MQTT: connected";
++        case DISPLAY_MQTT_DISCONNECTED:
++            return "MQTT: disconnected";
++        case DISPLAY_MQTT_CONNECT_FAILED:
++            return "MQTT: failed";
++        case DISPLAY_MQTT_SUBSCRIBE_FAILED:
++            return "MQTT: sub failed";
++        case DISPLAY_MQTT_UNAVAILABLE:
++            return "MQTT: unavailable";
++        case DISPLAY_MQTT_WAITING:
++        default:
++            return "MQTT: waiting";
++    }
++}
++
++void display_thread_entry(ULONG parameter)
++{
++    char temperature_text[24];
++    char counter_text[20];
++    ULONG next_counter_tick = tx_time_get() + TX_TIMER_TICKS_PER_SECOND;
++    ULONG next_led_blink_tick = tx_time_get() + TX_TIMER_TICKS_PER_SECOND;
++    ULONG poll_ticks = TX_TIMER_TICKS_PER_SECOND / 20u;
++    temperature_mode_t temperature_mode = TEMPERATURE_LIVE;
++    UINT green_led_on = 1u;
++    float frozen_temperature_degC = 0.0f;
++    float last_displayed_temperature = -1000.0f;
++    uint8_t last_displayed_counter = 0xFFu;
++    display_wifi_status_t last_wifi_status = (display_wifi_status_t)-1;
++    display_mqtt_status_t last_mqtt_status = (display_mqtt_status_t)-1;
++
++    NX_PARAMETER_NOT_USED(parameter);
++    if (poll_ticks == 0u)
++    {
++        poll_ticks = 1u;
++    }
++
++    while (1)
++    {
++        display_wifi_status_t wifi_status = wifi_display_status;
++        display_mqtt_status_t mqtt_status = mqtt_display_status;
++        UINT a_pressed = button_a_pressed;
++        UINT b_pressed = button_b_pressed;
++        UINT counter_should_pause = b_pressed && !a_pressed;
++        float measured_temperature = get_current_temperature();
++        float temperature;
++
++        if (temperature_mode == TEMPERATURE_BOTH_BUTTONS)
++        {
++            if (!a_pressed && !b_pressed)
++            {
++                temperature_mode = TEMPERATURE_LIVE;
++            }
++        }
++        else if (a_pressed && b_pressed)
++        {
++            frozen_temperature_degC = measured_temperature + 20.0f;
++            temperature_mode = TEMPERATURE_BOTH_BUTTONS;
++        }
++        else if (b_pressed)
++        {
++            if (temperature_mode != TEMPERATURE_FROZEN)
++            {
++                frozen_temperature_degC = measured_temperature;
++            }
++            temperature_mode = TEMPERATURE_FROZEN;
++        }
++        else if (a_pressed)
++        {
++            temperature_mode = TEMPERATURE_MAX;
++        }
++        else
++        {
++            temperature_mode = TEMPERATURE_LIVE;
++        }
++
++        switch (temperature_mode)
++        {
++            case TEMPERATURE_MAX:
++                temperature = TELEMETRY_TEMPERATURE_MAX_DEGC;
++                break;
++            case TEMPERATURE_FROZEN:
++            case TEMPERATURE_BOTH_BUTTONS:
++                temperature = frozen_temperature_degC;
++                break;
++            case TEMPERATURE_LIVE:
++            default:
++                temperature = measured_temperature;
++                break;
++        }
++        published_temperature_degC = temperature;
++
++        ULONG now = tx_time_get();
++        if (a_pressed && b_pressed)
++        {
++            set_rgb_led(2047u, 700u, 0u);
++        }
++        else if (a_pressed)
++        {
++            set_rgb_led(0u, 2047u, 0u);
++        }
++        else if (b_pressed)
++        {
++            set_rgb_led(2047u, 0u, 0u);
++        }
++        else
++        {
++            if ((LONG)(now - next_led_blink_tick) >= 0)
++            {
++                green_led_on = !green_led_on;
++                next_led_blink_tick = now + TX_TIMER_TICKS_PER_SECOND;
++            }
++            set_rgb_led(0u, green_led_on ? 2047u : 0u, 0u);
++        }
++
++        if ((LONG)(now - next_counter_tick) >= 0)
++        {
++            if (!counter_should_pause)
++            {
++                rolling_counter = (uint8_t)(rolling_counter + 1u);
++            }
++            next_counter_tick += TX_TIMER_TICKS_PER_SECOND;
++        }
++        if (counter_should_pause)
++        {
++            next_counter_tick = now + TX_TIMER_TICKS_PER_SECOND;
++        }
++
++        if (temperature != last_displayed_temperature ||
++            rolling_counter != last_displayed_counter ||
++            wifi_status != last_wifi_status ||
++            mqtt_status != last_mqtt_status)
++        {
++            npf_snprintf(temperature_text, sizeof(temperature_text), "Temp: %.1f C", (double)temperature);
++            npf_snprintf(counter_text, sizeof(counter_text), "Count: %03u", (unsigned)rolling_counter);
++
++            ssd1306_Fill(Black);
++            ssd1306_SetCursor(14, 0);
++            ssd1306_WriteString("FEVengers", Font_11x18, White);
++            ssd1306_SetCursor(2, 20);
++            ssd1306_WriteString(wifi_status_text(wifi_status), Font_7x10, White);
++            ssd1306_SetCursor(2, 31);
++            ssd1306_WriteString(mqtt_status_text(mqtt_status), Font_7x10, White);
++            ssd1306_SetCursor(2, 42);
++            ssd1306_WriteString(temperature_text, Font_7x10, White);
++            ssd1306_SetCursor(2, 53);
++            ssd1306_WriteString(counter_text, Font_7x10, White);
++            ssd1306_UpdateScreen();
++
++            last_displayed_temperature = temperature;
++            last_displayed_counter = rolling_counter;
++            last_wifi_status = wifi_status;
++            last_mqtt_status = mqtt_status;
++        }
++
++        tx_thread_sleep(poll_ticks);
++    }
++}
++
++void button_a_callback(void)
++{
++    button_a_pressed = BUTTON_A_IS_PRESSED ? 1u : 0u;
++}
++
++void button_b_callback(void)
++{
++    button_b_pressed = BUTTON_B_IS_PRESSED ? 1u : 0u;
++}
++
++static float get_published_temperature(void)
++{
++    return published_temperature_degC;
++}
++
++static uint8_t get_rolling_counter(void)
++{
++    return rolling_counter;
++}
+ 
+ /* Declare the disconnect notify function. */
+ static VOID client_disconnect_func(NXD_MQTT_CLIENT *client_ptr)
+ {
+     NX_PARAMETER_NOT_USED(client_ptr);
+     printf("client disconnected from broker.\r\n");
++    mqtt_display_status = DISPLAY_MQTT_DISCONNECTED;
+ }
+ 
+ static void send_message(){
+     UINT status;
+     
+     /* Publish a message with QoS Level 1. */
+-    char buffer[160] = {0};
+-    get_current_telemetry_string(buffer);
++    char buffer[NXD_MQTT_MAX_MESSAGE_LENGTH] = {0};
++    get_current_telemetry_string(buffer, sizeof(buffer), get_published_temperature(), get_rolling_counter());
+     //printf("%s", buffer);
+ 
+     status = nxd_mqtt_client_publish(&mqtt_client, MQTT_PUBLISH_TOPIC, STRLEN(MQTT_PUBLISH_TOPIC),
+@@ -107,11 +355,6 @@ static void mqtt_thread_work(NX_IP *ip_ptr, NX_PACKET_POOL *pool_ptr){
+     /* Register the disconnect notification function. */
+     nxd_mqtt_client_disconnect_notify_set(&mqtt_client, client_disconnect_func);
+ 
+-    /* Create an event flag for this demo. */
+-    status = tx_event_flags_create(&mqtt_app_flag, "MQTT event");
+-    if (status)
+-        error_count++;
+-
+     server_ip.nxd_ip_version = 4;
+     server_ip.nxd_ip_address.v4 = MQTT_LOCAL_BROKER_IP;
+ 
+@@ -121,15 +364,18 @@ static void mqtt_thread_work(NX_IP *ip_ptr, NX_PACKET_POOL *pool_ptr){
+                                      MQTT_KEEP_ALIVE_TIMER, 0, NX_WAIT_FOREVER);
+     if (status != NXD_MQTT_SUCCESS){
+                 printf("MQTT connect failed with code: %d\r\n", status);
++        mqtt_display_status = DISPLAY_MQTT_CONNECT_FAILED;
+     }
+     else{
+         printf("MQTT Client connected.\r\n");
++        mqtt_display_status = DISPLAY_MQTT_CONNECTED;
+     }
+ 
+     /* Subscribe to the topic with QoS level 0. */
+     status = nxd_mqtt_client_subscribe(&mqtt_client, MQTT_SUBSCRIBE_TOPIC, STRLEN(MQTT_SUBSCRIBE_TOPIC), QOS0);
+     if (status != NXD_MQTT_SUCCESS){
+                 printf("MQTT subscribe failed with code: %d\r\n", status);
++        mqtt_display_status = DISPLAY_MQTT_SUBSCRIBE_FAILED;
+     }
+     else{
+         printf("Subscribed to topic %s.\r\n", MQTT_SUBSCRIBE_TOPIC);
+@@ -171,13 +417,26 @@ void mqtt_thread_entry(ULONG parameter){
+     UINT status;
+ 
+     printf("Starting Eclipse ThreadX MQTT thread\r\n\r\n");
++    wifi_display_status = DISPLAY_WIFI_INITIALIZING;
++    mqtt_display_status = DISPLAY_MQTT_WAITING;
+ 
+     // Initialize the network
+     if ((status = wwd_network_init(WIFI_SSID, WIFI_PASSWORD, WIFI_MODE))){
+         printf("ERROR: Failed to initialize the network (0x%08x)\r\n", status);
++        wifi_display_status = DISPLAY_WIFI_FAILED;
++        mqtt_display_status = DISPLAY_MQTT_UNAVAILABLE;
++        return;
+     }
+ 
+-    wwd_network_connect();
++    wifi_display_status = DISPLAY_WIFI_CONNECTING;
++    if ((status = wwd_network_connect())){
++        printf("ERROR: Failed to connect to the network (0x%08x)\r\n", status);
++        wifi_display_status = DISPLAY_WIFI_SETUP_FAILED;
++        mqtt_display_status = DISPLAY_MQTT_UNAVAILABLE;
++        return;
++    }
+ 
++    wifi_display_status = DISPLAY_WIFI_CONNECTED;
++    mqtt_display_status = DISPLAY_MQTT_CONNECTING;
+     mqtt_thread_work(&nx_ip, nx_pool);
+ }
+diff --git a/MXChip/AZ3166/app/mqtt/mqtt_client.h b/MXChip/AZ3166/app/mqtt/mqtt_client.h
+index 7c0378b..0c236b8 100644
+--- a/MXChip/AZ3166/app/mqtt/mqtt_client.h
++++ b/MXChip/AZ3166/app/mqtt/mqtt_client.h
+@@ -21,12 +21,13 @@
+ #undef  NXD_MQTT_MAX_TOPIC_NAME_LENGTH
+ #undef  NXD_MQTT_MAX_MESSAGE_LENGTH
+ #define NXD_MQTT_MAX_TOPIC_NAME_LENGTH 70
+-#define NXD_MQTT_MAX_MESSAGE_LENGTH 170
++#define NXD_MQTT_MAX_MESSAGE_LENGTH 256
+ 
+ #define MQTT_CLIENT_STACK_SIZE 5120
+ 
+ 
+ void mqtt_thread_entry(ULONG thread_input);
++void display_thread_entry(ULONG thread_input);
+ 
+ /* Define the symbol for signaling a received message. */
+ 
+diff --git a/MXChip/AZ3166/app/mqtt/telemetry.c b/MXChip/AZ3166/app/mqtt/telemetry.c
+index 707925a..c710a5c 100644
+--- a/MXChip/AZ3166/app/mqtt/telemetry.c
++++ b/MXChip/AZ3166/app/mqtt/telemetry.c
+@@ -18,15 +18,11 @@
+ #include <stdio.h>
+ 
+ // Refresh interval
+-static const int32_t telemetry_interval = 5;
++static const int32_t telemetry_interval = 1;
+ 
+ // Current data
+ static sensor_data current_sensor_data;
+-
+-// Telemetry output
+-static const int TELEMETRY_ROWS        = 5;
+-static const int TELEMETRY_ROW_SIZE    = 40;
+-const int TELEMETRY_BUFFER_SIZE = 256;
++static volatile float current_temperature_degC;
+ 
+ /* Function to compare two float arrays
+  * Returns true if arrays are equal within the given tolerance, otherwise false.
+@@ -58,6 +54,12 @@ static UINT data_changed(sensor_data const * const current_data, sensor_data con
+              compare_float_arrays(current_data->magnetic_mG, new_data->magnetic_mG, 3, 1.0f)); // Could also be 5.0f
+ }
+ 
++#ifdef LOG_TELEMETRY
++// Telemetry output
++static const int TELEMETRY_ROWS        = 5;
++static const int TELEMETRY_ROW_SIZE    = 40;
++const int TELEMETRY_BUFFER_SIZE = 256;
++
+ static void get_sensor_data_buffer(sensor_data data, char* output){
+     char buf[TELEMETRY_ROWS][TELEMETRY_ROW_SIZE];
+     npf_snprintf(buf[0], TELEMETRY_ROW_SIZE, "Pressure: %.2f\r\n", (double)data.pressure_hPa);
+@@ -81,12 +83,6 @@ static void get_sensor_data_buffer(sensor_data data, char* output){
+     }
+ }
+ 
+-/** 
+- * Only used if LOG_TELEMETRY is defined. 
+- * 
+- * Uncomment the definition in telemetry.h if needed.
+- */
+-#ifdef LOG_TELEMETRY
+ static void print_sensor_data(sensor_data data){
+     char data_string[TELEMETRY_BUFFER_SIZE];
+     get_sensor_data_buffer(data, data_string);
+@@ -111,6 +107,7 @@ void telemetry_thread_entry(ULONG parameter)
+         // Acquire fresh data.
+         lps22hb_t lps22hb_data = lps22hb_data_read();
+         new_sensor_data.temperature_degC = lps22hb_data.temperature_degC;
++        current_temperature_degC = new_sensor_data.temperature_degC;
+         new_sensor_data.pressure_hPa = lps22hb_data.pressure_hPa;
+         hts221_data_t hts221_data = hts221_data_read();
+         new_sensor_data.humidity_perc = hts221_data.humidity_perc;
+@@ -128,8 +125,6 @@ void telemetry_thread_entry(ULONG parameter)
+                 printf("Telemetry changed.\r\n");
+                 print_sensor_data(new_sensor_data);
+             #endif
+-            tx_event_flags_set(&mqtt_app_flag, MQTT_MESSAGE_READY, TX_OR);
+-            current_sensor_data = new_sensor_data;
+         }
+         #ifdef LOG_TELEMETRY
+         else{
+@@ -137,6 +132,9 @@ void telemetry_thread_entry(ULONG parameter)
+         }
+         #endif
+ 
++        current_sensor_data = new_sensor_data;
++        tx_event_flags_set(&mqtt_app_flag, MQTT_MESSAGE_READY, TX_OR);
++
+         tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND * telemetry_interval);
+     }
+ }
+@@ -144,6 +142,29 @@ void telemetry_thread_entry(ULONG parameter)
+ /**
+  * Returns current telemetry as a string.
+  */
+-void get_current_telemetry_string(char* output){
+-    get_sensor_data_buffer(current_sensor_data, output);
++void get_current_telemetry_string(char* output, size_t output_size, float temperature_degC, uint8_t rolling_counter){
++    sensor_data data = current_sensor_data;
++    data.temperature_degC = temperature_degC;
++
++    npf_snprintf(output, output_size,
++                 "{\"pressure_hPa\":%.2f,"
++                 "\"temperature_degC\":%.2f,"
++                 "\"humidity_perc\":%.2f,"
++                 "\"acceleration_mg\":[%.2f,%.2f,%.2f],"
++                 "\"magnetic_mG\":[%.2f,%.2f,%.2f],"
++                 "\"counter\":%u}",
++                 (double)data.pressure_hPa,
++                 (double)data.temperature_degC,
++                 (double)data.humidity_perc,
++                 (double)data.acceleration_mg[0],
++                 (double)data.acceleration_mg[1],
++                 (double)data.acceleration_mg[2],
++                 (double)data.magnetic_mG[0],
++                 (double)data.magnetic_mG[1],
++                 (double)data.magnetic_mG[2],
++                 (unsigned)rolling_counter);
++}
++
++float get_current_temperature(void){
++    return current_temperature_degC;
+ }
+diff --git a/MXChip/AZ3166/app/mqtt/telemetry.h b/MXChip/AZ3166/app/mqtt/telemetry.h
+index 9dd795a..c5fbd20 100644
+--- a/MXChip/AZ3166/app/mqtt/telemetry.h
++++ b/MXChip/AZ3166/app/mqtt/telemetry.h
+@@ -13,6 +13,7 @@
+ #include "sensor.h"
+ #include "tx_api.h"
+ #include <math.h>
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ 
+@@ -31,7 +32,10 @@ typedef struct{
+     float magnetic_mG[3];
+ } sensor_data;
+ 
++#define TELEMETRY_TEMPERATURE_MAX_DEGC 85.0f
++
+ void telemetry_thread_entry(ULONG parameter);
+-void get_current_telemetry_string(char* output);
++void get_current_telemetry_string(char* output, size_t output_size, float temperature_degC, uint8_t rolling_counter);
++float get_current_temperature(void);
+ 
+ #endif // _TELEMETRY_H
+\ No newline at end of file
+diff --git a/MXChip/AZ3166/app/starter/cloud_config.h b/MXChip/AZ3166/app/starter/cloud_config.h
+index 9c4acf9..8daa2c4 100644
+--- a/MXChip/AZ3166/app/starter/cloud_config.h
++++ b/MXChip/AZ3166/app/starter/cloud_config.h
+@@ -27,9 +27,9 @@ typedef enum
+ // ----------------------------------------------------------------------------
+ // WiFi connection config
+ // ----------------------------------------------------------------------------
+-#define HOSTNAME      "eclipse-threadx"  //Change to unique hostname.
+-#define WIFI_SSID     "<redacted>"
+-#define WIFI_PASSWORD "<redacted>" 
++#define HOSTNAME      "sdv-hackathon_FEVengers"  //Change to unique hostname.
++#define WIFI_SSID     "<redacted>"
++#define WIFI_PASSWORD "<redacted>"
+ #define WIFI_MODE     WPA2_PSK_AES
+ 
+ // ----------------------------------------------------------------------------
