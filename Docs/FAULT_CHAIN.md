@@ -1,65 +1,101 @@
-# Fault Chain – DFM, SOVD Fault Bridge and Reporter
+# Fault Chain – Reporter, DFM and SOVD Fault Bridge
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
-How to run the complete fault path and read the Guardian faults as a table:
+How to run the complete fault path and read the Battery Thermal Guardian faults as a table, on the Ubuntu laptop and in AutoSD.
+
+Status: verified end to end on Ubuntu and in AutoSD (x86_64 QEMU) with the dummy Guardian in interactive mode.
 
 ```
-Reporter (dummy-guardian / Guardian)
+Reporter (dummy-guardian / Guardian, fault_lib)
    │  iceoryx2 publish (fault records)
    ▼
-DFM  (Eclipse OpenSOVD Diagnostic Fault Manager, stores faults)
+DFM  (Eclipse OpenSOVD Diagnostic Fault Manager: debounce, lifecycle, storage)
    ▲  iceoryx2 request/response "dfm/query"
    │
-SOVD fault bridge  ──HTTP :7691──►  curl / tester / evidence collector
+SOVD fault bridge  ──HTTP :7691──►  faults.sh / fault_host.sh / tester
 ```
 
-Related docs: `DFM_BRINGUP.md` (DFM image), `sovd-fault-bridge/README.md` (bridge), `DUMMY_GUARDIAN.md` (reporter).
+All three run as Podman containers on the **same machine**: iceoryx2 is shared-memory IPC and does not cross machine or VM boundaries.
+
+Related docs:
+
+| Doc | Content |
+|---|---|
+| `DFM_BRINGUP.md` | Building the DFM image |
+| `sovd-fault-bridge/README.md` | Bridge design and API |
+| `DUMMY_GUARDIAN.md` | Dummy Guardian build, modes, reusable `faults.rs` |
+| `PODMAN_MIGRATION.md` | Moving images, catalog and scripts from Ubuntu to AutoSD |
 
 ---
 
-## 1. Prerequisites
+## 1. Components
 
-Images built once:
+| Container | Image | Role |
+|---|---|---|
+| `dfm` | `localhost/dfm:dev` | Stores faults reported against the `battery` catalog |
+| `bridge` | `localhost/sovd-fault-bridge:dev` | Serves DFM faults as SOVD REST on port 7691 |
+| (reporter) | `localhost/dummy-guardian:dev` | Sets and clears the four Guardian faults |
 
-| Image | From |
+Faults (`battery_guardian_catalog.json`, catalog id `battery`, no debounce):
+
+| CLI name | Fault ID |
 |---|---|
-| `localhost/dfm:dev` | `dfm-container/Containerfile` |
-| `localhost/sovd-fault-bridge:dev` | `sovd-fault-bridge/Containerfile` |
-| `localhost/dummy-guardian:dev` | `dummy-guardian/Containerfile` |
+| `connection_lost` | `btg.src.connection_lost` |
+| `out_of_range` | `btg.temp.out_of_range` |
+| `stuck` | `btg.temp.stuck` |
+| `spike` | `btg.temp.spike` |
 
-Tools: `podman`, `curl`, `jq` (`sudo apt install -y jq`).
+---
 
-Catalog folder (contains only `battery_guardian_catalog.json`):
+## 2. Environment differences
+
+| | Ubuntu laptop | AutoSD VM |
+|---|---|---|
+| Catalog folder `$C` | `/home/ashwin/Workspace/Hackathone2026/FEVengers/FEVengers_Hackathon_2026/catalogs` | `/root/catalogs` |
+| Extra Podman option | none | `--security-opt label=disable` (SELinux) |
+| `sudo` for cleanup | yes | no (root) |
+| Table script | `fault_host.sh` (curl + jq) | `faults.sh` (curl + python3) |
+| Access | local terminal | `ssh -p 2222 root@localhost`, one window per task |
+
+Set these once per shell:
 
 ```bash
+# Ubuntu
 C=/home/ashwin/Workspace/Hackathone2026/FEVengers/FEVengers_Hackathon_2026/catalogs
+SEL=""
+
+# AutoSD
+C=/root/catalogs
+SEL="--security-opt label=disable"
 ```
+
+All commands below use `$C` and `$SEL`, so they work unchanged in both environments.
 
 ---
 
-## 2. Start the chain
+## 3. Start the chain
 
-Order matters: **DFM → bridge → reporter**.
+Order: **clean → DFM → bridge → reporter**.
 
-### 2.1 Clean state
+### 3.1 Clean state
 
 Stale iceoryx2 files from killed containers cause timeouts.
 
 ```bash
-podman rm -f bridge dfm
-sudo rm -rf /tmp/iceoryx2/* ; sudo rm -f /dev/shm/iox2_*
+podman rm -f bridge dfm 2>/dev/null
+rm -rf /tmp/iceoryx2/* ; rm -f /dev/shm/iox2_*      # Ubuntu: prefix with sudo
 mkdir -p /tmp/iceoryx2
 ```
 
-### 2.2 DFM
+### 3.2 DFM
 
 ```bash
-podman run -d --name dfm --ipc=host --pid=host --restart=always \
+podman run -d --name dfm --ipc=host --pid=host --restart=always $SEL \
   -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 \
   -v $C:/catalogs:ro -v dfm-store:/store \
   localhost/dfm:dev
-podman logs -f dfm
+sleep 2; podman logs dfm
 ```
 
 Wait for:
@@ -70,40 +106,37 @@ DFM ready
 DFM transport listening...
 ```
 
-| Option | Why |
-|---|---|
-| `-v $C:/catalogs:ro` | Loads only our catalog |
-| `-v dfm-store:/store` | Fault memory survives DFM restarts |
-| `--restart=always` | Podman restarts the DFM if it dies |
-
-### 2.3 SOVD fault bridge
+### 3.3 Bridge
 
 Always (re)start the bridge after the DFM.
 
 ```bash
-podman run -d --name bridge --net=host --ipc=host --pid=host \
+podman run -d --name bridge --net=host --ipc=host --pid=host $SEL \
   -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 \
   localhost/sovd-fault-bridge:dev
-podman logs bridge
+sleep 1; podman logs bridge
 ```
 
 Expected: `SOVD fault bridge listening on 0.0.0.0:7691 (entities: ["battery", "hvac"])`.
 
-Check: four faults, nothing active.
+### 3.4 Check
 
 ```bash
-curl -s http://127.0.0.1:7691/sovd/v1/components/battery/faults | jq '.items[].code'
+podman ps --format "{{.Names}} {{.Status}}"     # dfm and bridge: Up
+./fault_host.sh                                  # Ubuntu
+/root/faults.sh                                  # AutoSD
 ```
 
-### 2.4 Reporter
+All four faults listed, all `ok`.
 
-Interactive dummy Guardian (see `DUMMY_GUARDIAN.md`):
+### 3.5 Reporter
+
+Separate terminal (AutoSD: separate SSH window):
 
 ```bash
-podman run --rm -it --ipc=host --pid=host \
+podman run --rm -it --ipc=host --pid=host $SEL \
   -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 -v $C:/catalogs:ro \
   localhost/dummy-guardian:dev interactive
-> set stuck
 ```
 
 The DFM log shows each report:
@@ -113,43 +146,47 @@ Received new fault ID: Text("btg.temp.stuck")
 process_record{path="battery"}: ... Fault ID ... stored
 ```
 
+### Podman options
+
+| Option | Container | Why |
+|---|---|---|
+| `--ipc=host`, `--pid=host` | all | iceoryx2 shared memory and dead-peer detection across containers |
+| `-v /dev/shm:/dev/shm`, `-v /tmp/iceoryx2:/tmp/iceoryx2` | all | Shared memory segments and iceoryx2 discovery files |
+| `-v $C:/catalogs:ro` | DFM, reporter | Same catalog on both sides |
+| `-v dfm-store:/store` | DFM | Fault memory survives DFM restarts |
+| `--restart=always` | DFM | Podman restarts the DFM if it dies |
+| `--net=host` | bridge | Port 7691 reachable; avoids rootless IPv6 port-forward reset |
+| `$SEL` | all (AutoSD) | SELinux would block the shared mounts |
+| `-it` | reporter | Interactive input |
+
 ---
 
-## 3. Fault table
+## 4. Fault table
 
-### 3.1 Script
+### 4.1 Scripts
 
-```bash
-cat > ~/faults.sh <<'EOF'
-#!/bin/bash
-# Created with AI assistance (Claude Opus 5.5, Anthropic).
-# Show Guardian fault states from the SOVD fault bridge as a table.
-curl -s http://127.0.0.1:7691/sovd/v1/components/battery/faults | \
-  jq -r '["FAULT","STATE","EVER","COUNT"],
-         (.items[] | [.code,
-                      (if .status.test_failed then "FAULTY" else "ok" end),
-                      (if .status.test_failed_since_last_clear then "yes" else "no" end),
-                      (.occurrence_counter // 0)])
-         | @tsv' | column -t
-EOF
-chmod +x ~/faults.sh
-```
+| Script | Where | Needs |
+|---|---|---|
+| `scripts/fault_host.sh` | Ubuntu laptop | `curl`, `jq`, `column` |
+| `scripts/faults.sh` | AutoSD | `curl`, `python3` |
 
-### 3.2 Use
+Both print the same table. Install:
 
 ```bash
-~/faults.sh                 # once
-watch -n 1 ~/faults.sh      # live view while the reporter runs
+# Ubuntu
+chmod +x scripts/fault_host.sh
+
+# AutoSD (copy from laptop, see PODMAN_MIGRATION.md)
+chmod +x /root/faults.sh
 ```
 
-Example after `set stuck`:
+### 4.2 Use
 
-```
-FAULT                    STATE   EVER  COUNT
-btg.src.connection_lost  ok      no    0
-btg.temp.out_of_range    ok      no    0
-btg.temp.stuck           FAULTY  yes   1
-btg.temp.spike           ok      no    0
+Separate terminal (AutoSD: separate SSH window):
+
+```bash
+watch -n 1 ./scripts/fault_host.sh     # Ubuntu
+watch -n 1 /root/faults.sh             # AutoSD
 ```
 
 | Column | Source field | Meaning |
@@ -159,26 +196,58 @@ btg.temp.spike           ok      no    0
 | `EVER` | `status.test_failed_since_last_clear` | Failed at least once since the last clear (evidence) |
 | `COUNT` | `occurrence_counter` | Number of occurrences |
 
-After `clear stuck`, `STATE` returns to `ok`; `EVER` stays `yes` and `COUNT` stays `1`.
+### 4.3 Verified test sequence
 
-### 3.3 Other queries
+In the reporter:
+
+```
+> set stuck
+> set spike
+> status
+> clear stuck
+> set connection_lost
+> clear spike
+> clear connection_lost
+> quit
+```
+
+Table after each step (starting from a cleared fault memory):
+
+| After | `stuck` | `spike` | `connection_lost` |
+|---|---|---|---|
+| `set stuck` | FAULTY yes 1 | ok no 0 | ok no 0 |
+| `set spike` | FAULTY yes 1 | FAULTY yes 1 | ok no 0 |
+| `clear stuck` | ok yes 1 | FAULTY yes 1 | ok no 0 |
+| `set connection_lost` | ok yes 1 | FAULTY yes 1 | FAULTY yes 1 |
+| `clear spike`, `clear connection_lost` | ok yes 1 | ok yes 1 | ok yes 1 |
+
+After `clear`, `STATE` returns to `ok` while `EVER` and `COUNT` keep the evidence.
+
+Example:
+
+```
+FAULT                    STATE   EVER  COUNT
+btg.src.connection_lost  ok      no    0
+btg.temp.out_of_range    ok      no    0
+btg.temp.stuck           FAULTY  yes   1
+btg.temp.spike           ok      no    0
+```
+
+### 4.4 Other queries
 
 ```bash
 B=http://127.0.0.1:7691/sovd/v1
 
-# Active faults only
-curl -s $B/components/battery/faults | jq '[.items[] | select(.status.test_failed) | .code]'
-
-# One fault with environment data
-curl -s $B/components/battery/faults/btg.temp.stuck | jq
-
-# Clear fault memory (start of each campaign run)
-curl -s -i -X DELETE $B/components/battery/faults
+curl -s $B/components/battery/faults                       # raw JSON
+curl -s $B/components/battery/faults/btg.temp.stuck        # one fault + environment data
+curl -s -i -X DELETE $B/components/battery/faults          # clear fault memory (start of each run)
 ```
+
+`dfm-store` keeps counts across DFM restarts. Clear the fault memory before a test run to start from zero.
 
 ---
 
-## 4. Stop
+## 5. Stop
 
 ```bash
 podman rm -f bridge dfm
@@ -187,43 +256,18 @@ podman volume rm dfm-store     # only to wipe stored faults
 
 ---
 
-## 5. AutoSD
-
-Same commands inside the VM, with two differences:
-
-| Difference | Change |
-|---|---|
-| SELinux enforcing | Add `--security-opt label=disable` to every container |
-| Catalog path | Copy the folder: `scp -P 2222 -r $C root@localhost:/root/catalogs`, then use `-v /root/catalogs:/catalogs:ro` |
-
-Transfer images from the laptop:
-
-```bash
-for img in dfm sovd-fault-bridge dummy-guardian; do
-  podman save -o $img.tar localhost/$img:dev
-  scp -P 2222 $img.tar root@localhost:/root/
-  ssh -p 2222 root@localhost podman load -i /root/$img.tar
-done
-```
-
-Reach the bridge from the laptop with an SSH tunnel, then run `~/faults.sh` on the laptop:
-
-```bash
-ssh -p 2222 -L 7691:localhost:7691 root@localhost
-```
-
----
-
 ## 6. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `curl` prints nothing | Bridge not running | `podman ps`; start the bridge |
-| `503 storage error: query timeout` | DFM not running or not reachable | `podman ps -a`; clean restart (2.1–2.3) |
+| Table: `bridge not reachable` | Bridge not running | `podman ps -a`; start the bridge (3.3) |
+| `503 storage error: query timeout` | DFM not running or not reachable | Clean restart (3.1–3.3) |
 | Reporter: `cannot connect to DFM ... Timeout` | Same | Same |
-| `dfm Exited (137)` | DFM killed | `--restart=always`; clean restart |
-| `Connection reset by peer` | Rootless port forward over IPv6 | Bridge with `--net=host`; use `127.0.0.1` |
-| Only `hvac` / `ivi` faults listed | DFM started without our catalog mount | Restart the DFM with `-v $C:/catalogs:ro` |
-| DFM log: `No JSON catalog files found` | Wrong catalog path | `ls -l $C`; fix `C=` |
+| `dfm Exited (137)` | DFM killed | Clean restart; `--restart=always` |
+| Only `hvac` / `ivi` faults listed | DFM started without the catalog mount | Restart the DFM with `-v $C:/catalogs:ro` |
+| DFM log: `No JSON catalog files found` | Wrong `$C` | `ls -l $C` |
+| `Permission denied` on mounts (AutoSD) | SELinux | `$SEL` set to `--security-opt label=disable` |
+| `Connection reset by peer` (Ubuntu) | Rootless port forward over IPv6 | Bridge with `--net=host`; use `127.0.0.1` |
+| `faults.sh`: `SyntaxError ... line continuation` | Old script version with escaped f-strings | Use the current `scripts/faults.sh` |
 | iceoryx2 warning `No config file was loaded` | Default iceoryx2 config | Harmless |
 | DFM log: `get_value could not find key` | First access to empty store | Harmless |
