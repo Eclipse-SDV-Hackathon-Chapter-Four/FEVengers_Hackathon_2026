@@ -15,4 +15,4 @@
 # shows its effect within ~1 minute.
 
 [thermal]
-mitigation_timeout_ms = 10000
+mitigation_timeout_ms = 120000

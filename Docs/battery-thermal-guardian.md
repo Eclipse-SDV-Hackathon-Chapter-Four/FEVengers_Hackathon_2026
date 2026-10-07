@@ -44,24 +44,76 @@ MQTT readings into uProtocol messages. The Guardian only ever sees uProtocol.
 Every fault is published on the uProtocol fault topic (RAISED / CLEARED).
 The four faults of the DFM catalog
 [`dfm-container/battery_guardian_catalog.json`](../dfm-container/battery_guardian_catalog.json)
-(catalog id `battery`) are also reported to the DFM
-(see [DFM reporting](#dfm-reporting)).
+(catalog id `battery`) are also reported to the DFM (see
+[DFM reporting](#dfm-reporting)); the transport faults are not in the catalog.
 
-| Fault | DFM catalog id | Class | Meaning | To DFM |
-|---|---|---|---|---|
-| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No data: no message at all within the timeout (board, Wi-Fi or MQTT link lost) | yes |
-| `TempOutOfRange` | `btg.temp.out_of_range` | Signal | Temperature outside the physically plausible range | yes |
-| `TempSignalStuck` | `btg.temp.stuck` | Signal | Data arrives, but the device's rolling counter does not increase (it repeats its last reading) | yes |
-| `TempSignalSpike` | `btg.temp.spike` | Signal | Implausible jump between samples, not confirmed by the next one | yes |
-| `TransportDelay` | – | Transport | Sample arrived later than the allowed end-to-end latency | no |
-| `TransportDuplicate` | – | Transport | Same rolling counter as the previous sample | no |
-| `TransportOutOfOrder` | – | Transport | Sample older than one already received | no |
-| `PayloadInvalid` | – | Transport | Message is not a valid VSS sample | no |
+| Fault | DFM catalog id | Class | Meaning |
+|---|---|---|---|
+| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No data: no message at all within the timeout (board, Wi-Fi or MQTT link lost) |
+| `TempOutOfRange` | `btg.temp.out_of_range` | Signal | Temperature outside the physically plausible range |
+| `TempSignalStuck` | `btg.temp.stuck` | Signal | Data arrives, but the device's rolling counter does not increase (it repeats its last reading) |
+| `TempSignalSpike` | `btg.temp.spike` | Signal | Implausible jump between samples, not confirmed by the next one |
+| `TransportDelay` | – | Transport | Sample arrived later than the allowed end-to-end latency (`max_latency_ms`) |
+| `TransportDuplicate` | – | Transport | Same rolling counter as the previous sample |
+| `TransportOutOfOrder` | – | Transport | Sample older than one already received |
+| `PayloadInvalid` | – | Transport | Message is not a valid VSS sample |
 
-How each fault is detected and what it does to the state machine:
+A sample that raises a transport fault is discarded before the temperature
+checks. How each fault is detected and what it does to the state machine:
 [Signal integrity](#signal-integrity).
 
 ## Run the full chain
+
+There are two ways to run it. **Do not run both at once**: `autosd.sh`
+forwards host port 1883 to the broker inside AutoSD and stops a local
+Mosquitto on that port.
+
+| Setup | What runs where | Use it for |
+|---|---|---|
+| **On AutoSD** (reference) | Everything, including the MQTT broker, as Ankaios workloads in the AutoSD image | Demo, campaigns, the real system |
+| **On one machine** | Broker (Docker), publisher and Guardian as local programs | Trying a change quickly, without building images |
+
+### On AutoSD (reference setup)
+
+The MQTT broker, the publisher, the Guardian, the DFM and the OpenSOVD
+gateway run as Ankaios workloads in AutoSD
+([`deploy/ankaios-manifest.yaml`](../deploy/ankaios-manifest.yaml)). From the
+repository root:
+
+```sh
+./autosd/autosd.sh             # start AutoSD; forwards 1883 (MQTT) and 7690 (SOVD)
+./deploy/setup-autosd.sh       # once: install Ankaios in the image
+./deploy/build-images.sh       # build the service images
+./deploy/deploy-to-autosd.sh   # load them and start the workloads (also at every boot)
+```
+
+Details: [AutoSD setup](AutosdSetup.md) and [building and deploying the images](BUILD_IMAGES.md).
+
+**Feed it data**: the AZ3166 publishes to `<this machine's Wi-Fi IP>:1883`
+(`./autosd/autosd.sh status` prints the address); QEMU forwards it to the
+broker in AutoSD. Reset the board after AutoSD or the broker restarted. To
+replay a recorded MQTT log instead, send it to the forwarded port:
+
+```sh
+while IFS= read -r line; do echo "$line"; sleep 1; done < mqtt_log.txt \
+  | mosquitto_pub -h localhost -p 1883 -t FEVengers_MQTT/telemetry -l
+```
+
+**Watch it**:
+
+```sh
+# Guardian events, inside AutoSD
+./autosd/autosd.sh ssh
+podman run --rm --net=host --entrypoint guardian-monitor localhost/battery-thermal-guardian:dev --no-heartbeat
+
+# Faults in the DFM, through the OpenSOVD gateway, from this machine
+curl -s http://localhost:7690/sovd/v1/apps/battery/faults    # web page: http://localhost:7690/ui/
+
+# Empty the DFM's fault memory before a test run
+./deploy/deploy-to-autosd.sh clear-faults
+```
+
+### On one machine (development)
 
 All commands run from the repository root.
 
@@ -88,26 +140,11 @@ battery-thermal-guardian/target/release/guardian-monitor --no-heartbeat | tee ev
 vss-uprotocol-publisher/target/release/vss-uprotocol-publisher -c vss-uprotocol-publisher/config/publisher.toml --correlation-id run-001
 ```
 
-**Optional: DFM.** To get the catalog faults into the Diagnostic Fault
-Manager as well, start the DFM ([DFM bring-up](DFM_BRINGUP.md)) with the
-folder `C` that contains `battery_guardian_catalog.json` mounted at
-`/catalogs`. Then start the Guardian (instead of the
-`guardian` command above) with the same iceoryx2 options and the same catalog:
+The DFM is not part of this setup; to try DFM reporting locally, see
+[DFM reporting](#dfm-reporting) and the [DFM bring-up](DFM_BRINGUP.md).
 
-```sh
-podman build -t battery-thermal-guardian -f battery-thermal-guardian/Containerfile battery-thermal-guardian
-podman run --rm --net=host --ipc=host --pid=host --user 0:0 \
-  -v /dev/shm:/dev/shm -v /tmp/iceoryx2:/tmp/iceoryx2 -v $C:/catalogs:ro \
-  battery-thermal-guardian --config /etc/guardian/guardian.toml \
-  --dfm-catalog /catalogs/battery_guardian_catalog.json
-```
-
-On AutoSD add `--security-opt label=disable`. The Guardian also starts
-without the DFM and connects as soon as it is up (see
-[DFM reporting](#dfm-reporting)).
-
-**3. Feed it data**: either the real AZ3166 (it publishes to the broker's
-address on port 1883), or a recorded MQTT log with one JSON message per line,
+**3. Feed it data**: either the real AZ3166 (pointed at this machine's
+address, port 1883), or a recorded MQTT log with one JSON message per line,
 sent at one message per second:
 
 ```sh
@@ -211,12 +248,11 @@ mitigation. The signal is untrusted when (see [Signal integrity](#signal-integri
 
 CRITICAL and MITIGATING stay latched when the signal is lost. An active
 mitigation is not released just because the evidence went away, and the
-mitigation timeout keeps running, so it can still escalate.
+mitigation timeout keeps running.
 
 | Mitigation | When |
 |---|---|
-| `REDUCE_POWER_MAX_COOLING` | first CRITICAL |
-| `OCCUPANT_EVACUATION_WARNING` | mitigation failed (re-asserted on every further timeout) |
+| `REDUCE_POWER_MAX_COOLING` | CRITICAL |
 | `MONITORING_UNAVAILABLE_WARNING` | DEGRADED |
 
 All active mitigations are `RELEASED` when the condition improves or the signal
@@ -228,26 +264,23 @@ replayable.
 
 ## Signal integrity
 
-Each sample passes these checks in order. A sample that fails a check is
-discarded and raises a fault. The fault clears after `heal_samples` accepted
-samples in a row. If messages keep arriving but none is accepted for
-`stale_timeout_ms` (delayed, out of range, invalid, ...), the signal is
-untrusted and the Guardian goes to DEGRADED, with those faults as the
-reason. That is not a connection loss: data arrives.
+Each message first has to be a valid, new and timely sample: duplicated,
+out-of-order and delayed (older than `max_latency_ms`) messages and invalid
+payloads are discarded. A sample then passes the fault checks below; a
+sample that fails one is discarded and raises the fault, which clears after
+`heal_samples` accepted samples in a row. If messages keep arriving but none
+is accepted for `stale_timeout_ms` (e.g. always out of range), the signal is
+untrusted and the Guardian goes to DEGRADED. That is not a connection loss:
+data arrives.
 
 | Fault | Detection | Effect |
 |---|---|---|
-| `TransportDuplicate` | same `rolling_counter` as previous | sample discarded |
-| `TransportOutOfOrder` | older `rolling_counter` / send time | sample discarded |
-| `TransportDelay` | arrival − uMessage creation time > `max_latency_ms` | sample discarded |
 | `TempOutOfRange` | outside `[min_c, max_c]` or NaN | sample discarded |
 | `TempSignalSpike` | rate > `max_rate_c_per_s`, not confirmed by next sample | sample discarded |
-| `TempSignalStuck` | same `rolling_counter` for `stuck_window_ms` (every repeat is also a `TransportDuplicate`) | **DEGRADED** |
+| `TempSignalStuck` | same `rolling_counter` for `stuck_window_ms` | **DEGRADED** |
 | `TempSourceConnectionLost` | no message for `stale_timeout_ms` | **DEGRADED** |
-| `PayloadInvalid` | payload is not a `VssSample`, or no UUIDv7 message id | message discarded |
 
-Fault events carry the DFM catalog id in `catalog_id` (`null` for the
-transport faults, see [Faults](#faults)).
+Fault events carry the DFM catalog id in `catalog_id`.
 
 A fast change that the next sample confirms is accepted, not filtered. Real
 thermal runaway can rise very quickly, and a spike filter must not hide it.
@@ -258,14 +291,14 @@ newer, otherwise older:
 
 | previous → new counter | Guardian sees |
 |---|---|
-| 254 → 254 | duplicate |
+| 254 → 254 | same reading again: discarded |
 | 254 → 255, 255 → 0 | next reading |
 | 254 → 1 | next reading, 2 counted as `missing` |
-| 5 → 3, sent earlier | out of order |
+| 5 → 3, sent earlier | older reading: discarded |
 | 120 → 0, sent later | device restart: accepted, counting continues from 0 |
 
 Gaps are counted as `missing` in the heartbeat. A board whose counter has
-frozen produces only duplicates; after `stuck_window_ms` the Guardian raises
+frozen only repeats its last reading; after `stuck_window_ms` the Guardian raises
 `TempSignalStuck` and goes to DEGRADED. A steady temperature with an
 increasing counter is not a fault.
 
@@ -337,7 +370,6 @@ the file must be the same one the DFM loads.
 | `TempOutOfRange` | `OutOfRange` (`btg.temp.out_of_range`) | `Failed` / `Passed` |
 | `TempSignalStuck` | `Stuck` (`btg.temp.stuck`) | `Failed` / `Passed` |
 | `TempSignalSpike` | `Spike` (`btg.temp.spike`) | `Failed` / `Passed` |
-| transport faults, `PayloadInvalid` | – (not in the catalog) | not reported |
 
 - **Connection**: on connect, fault-lib checks the catalog hash with the DFM,
   so a DFM with another version of the catalog is refused. While the DFM is
@@ -398,17 +430,12 @@ printf 'FROM docker.io/library/rust:1.99.0-bookworm\nRUN apt-get update && apt-g
 alias cargo='docker run --rm -it --net=host -u "$(id -u):$(id -g)" -e CARGO_HOME=/w/target/cargo-home -v "$PWD":/w -w /w rust-clang cargo'
 ```
 
-## Not yet covered
+## Current limits
 
-- Only the four catalog faults reach the DFM. Transport faults, state
-  changes, mitigations and heartbeats are only published over uProtocol
-  (seen by `guardian-monitor`); getting them into the DFM is still open and
-  needs new entries in the DFM catalog.
 - Readings that MQTT delivers back to back after a Wi-Fi hiccup are sent
   milliseconds apart and can trip the spike check.
 - Arrival order of messages that come in back to back is not guaranteed:
   up-transport-zenoh hands every received message to the listener in its own
-  task. Such messages can be swapped inside the Guardian (possible false
-  `TransportOutOfOrder`) or a real swap can be undone.
-- Drift detection needs a second, redundant temperature signal.
+  task. Such messages can be swapped inside the Guardian (a sample may be
+  discarded as out of order) or a real swap can be undone.
 - Latency checks need publisher and Guardian clocks to agree (same host or NTP).
