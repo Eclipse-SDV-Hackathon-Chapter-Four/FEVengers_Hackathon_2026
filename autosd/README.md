@@ -4,7 +4,70 @@
 
 Put your copy of the Eclipse AutoSD QEMU image into this folder and start it with `autosd.sh`. The image is not in git (3.6 GB); everyone brings their own. The script only starts the image, it does not download or copy one.
 
-Image: `eclipse-autosd-bootc-qemu-x86_64.qcow2`, the `dev` rolling release of [eclipse-autosd](https://github.com/eclipse-autosd/eclipse-autosd) (published as `.qcow2.xz`; unpack it first). All scripts in `deploy/` are written for this image.
+## What you need
+
+### 1. The image
+
+| | |
+|---|---|
+| File to put into this folder | `eclipse-autosd-bootc-qemu-x86_64.qcow2` (3.6 GB, exactly this name) |
+| Project | [eclipse-autosd](https://github.com/eclipse-autosd/eclipse-autosd), release `dev` ("Rolling Builds") |
+| Published as | `eclipse-autosd-bootc-qemu-x86_64.qcow2.xz`, 424,103,948 bytes |
+| Build we use | 2026-10-02 |
+| SHA-256 of the `.xz` | `ebf8c0316a573d3aaba6730043aeb800d4bf550aa06f5ce2dd8220277b933cfa` |
+
+The release is rolling: the file behind the same name is replaced by newer builds. Check the checksum before unpacking, so everyone runs the same image:
+
+```bash
+sha256sum eclipse-autosd-bootc-qemu-x86_64.qcow2.xz
+xz --decompress --keep eclipse-autosd-bootc-qemu-x86_64.qcow2.xz
+```
+
+Other AutoSD images (the aarch64 build, the CentOS nightly `developer` image) are not what the scripts in `deploy/` were written and tested for.
+
+What this build contains, to compare with a running image (`./autosd/autosd.sh ssh`):
+
+| Inside the image | Version | Check with |
+|---|---|---|
+| OS | Automotive Stream Distribution 10 | `cat /etc/os-release` |
+| Image build time | 2026-10-02T15:59:54Z | `bootc status` |
+| Kernel | 6.12.0-270.el10iv.x86_64 | `uname -r` |
+| Podman | 6.1.0 | `podman --version` |
+| Python | 3.12.14 | `python3 --version` |
+
+### 2. Programs on your machine
+
+Versions are the ones this was tested with (Ubuntu 22.04, x86_64). Only OpenSSH has a known minimum.
+
+| Program | Tested version | Needed for | Ubuntu package |
+|---|---|---|---|
+| QEMU (`qemu-system-x86_64`) | 6.2.0 | Running the image | `qemu-system-x86` |
+| OVMF (UEFI firmware) | 2022.02 | Booting the image | `ovmf` |
+| KVM (`/dev/kvm`) | – | Speed; without it AutoSD runs emulated and very slowly | part of the kernel; your user must be in the `kvm` group |
+| OpenSSH client | 8.9 (minimum 8.4) | Shell and all `deploy/` scripts; 8.4 added the password helper they use | `openssh-client` |
+| Python 3 | 3.10 | Clean shutdown of AutoSD | `python3` |
+| iproute2 (`ss`, `ip`) | 5.15 | Finding busy ports and this machine's address | `iproute2` |
+| Bash | 5.1 | The scripts | `bash` |
+| Podman, or Docker | Podman 3.4.4 | Building the service images (`deploy/build-images.sh`) | `./deploy/install-build-deps.sh` installs Podman |
+
+```bash
+sudo apt install qemu-system-x86 ovmf openssh-client python3 iproute2
+./autosd/autosd.sh check     # reports what is still missing
+```
+
+Optional, for testing the MQTT path by hand: `mosquitto-clients` (2.0.11).
+
+### 3. Installed into the image by our scripts
+
+Not part of the stock image; added once per image by `./deploy/setup-autosd.sh`.
+
+| Program | Version | Check with |
+|---|---|---|
+| Eclipse Ankaios (`ank`, `ank-server`, `ank-agent`) | v1.0.4 | `ank --version` inside AutoSD, or `./deploy/setup-autosd.sh --check` |
+
+The MQTT broker (`docker.io/library/eclipse-mosquitto:2`) and our services are containers; `./deploy/deploy-to-autosd.sh` loads them.
+
+## Start
 
 ```bash
 ./autosd/autosd.sh          # (re)start AutoSD and open a shell inside it
@@ -23,8 +86,6 @@ Starting always gives a fresh instance:
 | After boot | Opens a root shell inside AutoSD; `exit` leaves it, AutoSD keeps running |
 
 Restarting AutoSD restarts the MQTT broker, so the board must be reset afterwards (see below). To only get a shell, use `ssh`.
-
-Needs `qemu-system-x86_64` and OVMF (Ubuntu: `sudo apt install qemu-system-x86 ovmf`). With KVM the image boots in about 20 seconds.
 
 ## Ports
 
