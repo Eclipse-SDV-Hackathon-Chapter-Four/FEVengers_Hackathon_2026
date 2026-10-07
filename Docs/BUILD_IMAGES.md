@@ -8,11 +8,21 @@ Status: all images build with Podman on Ubuntu 22.04. See [section 5](#7-status)
 
 ---
 
+A new machine, from a fresh clone to the running system in one command (it runs sections 1, 2, 5 and 6 below and starts AutoSD in between; see [`AutosdSetup.md`](AutosdSetup.md)):
+
+```bash
+./deploy/setup-all.sh
+```
+
+---
+
 ## 1. Install the build tools (once)
 
 ```bash
 ./deploy/install-build-deps.sh
 ```
+
+`./deploy/install-host-deps.sh` installs everything the scripts of this repository need on the machine, not only for building: it installs the packages to run AutoSD and to deploy (QEMU, OVMF, OpenSSH client, ...), the tools used by hand (`jq`, `mosquitto_pub`), and then calls `install-build-deps.sh`. The list is in [`AutosdSetup.md`](AutosdSetup.md), section 2.
 
 All services are compiled inside containers, so the host needs no Rust toolchain. The only requirement is Podman or Docker.
 
@@ -129,7 +139,7 @@ The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localh
 
 ## 5. Prepare the AutoSD system (once)
 
-The target is any running AutoSD system reachable over SSH: the QEMU image on the developer machine, or a device on the network. To run the QEMU image, see [`AutosdSetup.md`](AutosdSetup.md): put the image into `autosd/` and run `./autosd/autosd.sh`.
+The target is any running AutoSD system reachable over SSH: the QEMU image on the developer machine, or a device on the network. To run the QEMU image, see [`AutosdSetup.md`](AutosdSetup.md): `./autosd/autosd.sh` downloads the image into `autosd/` if it is not there, and starts it.
 
 ```bash
 ./deploy/setup-autosd.sh           # install and start Ankaios if it is not running
@@ -212,7 +222,8 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `install-build-deps.sh`, install paths (apt / dnf / pacman / brew) | Not tested |
 | `build-images.sh` with Docker, or on an ARM host | Not tested |
 | `setup-autosd.sh --check`, `deploy-to-autosd.sh status` | Run against the QEMU image |
-| `setup-autosd.sh`, install path | Not run. The install steps are the ones recorded for our QEMU image, where they worked by hand |
+| `setup-autosd.sh`, install path | Run by `setup-all.sh` against a freshly downloaded, untouched image: Ankaios 1.0.4 installed, agent `agent_A` connected |
+| `setup-all.sh` | Run against that image (second AutoSD on other ports): six workloads `Running(Ok)`, 77 s with the builds cached; run again: nothing loaded or restarted. Details in `AutosdSetup.md`, Status |
 | `deploy-to-autosd.sh --no-persist` (the default at that time) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
 | `deploy-to-autosd.sh --no-build`, persistent (the default now), followed by a restart of the image | Run: all five workloads come back `Running(Ok)` on their own, `/tmp/iceoryx2` is recreated, the SOVD interface answers, no SELinux denials |
 | Data from the real board through to the Guardian | Run: readings arrive on `FEVengers_MQTT/telemetry` once per second and the Guardian goes `CLEAR` → `MONITORING` |
