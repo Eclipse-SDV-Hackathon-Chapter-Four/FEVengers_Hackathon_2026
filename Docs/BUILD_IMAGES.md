@@ -133,7 +133,7 @@ The evidence collector runs without a Zenoh configuration file, like the Guardia
 | Who starts the containers | `podman run`, `--restart=always` | Ankaios workloads | Come back after a reboot, one manifest |
 | Fault reporter | `dummy-guardian` (removed from the repository) | The real Guardian | Faults come from real data: the board's buttons, or a test MQTT message |
 
-The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localhost:1883`. That is the topic the board firmware publishes on (`MQTT_CLIENT_NAME "/telemetry"` with client name `FEVengers_MQTT`, see `Threadx_AZ3166_MQTT_Temp_Source.md`).
+The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localhost:1883`. That is the topic the board firmware publishes on (`MQTT_TELEMETRY_TOPIC` in `az3166-firmware/app/FEVengersApp/cloud_config.h`, see [`az3166-firmware.md`](az3166-firmware.md)).
 
 ---
 

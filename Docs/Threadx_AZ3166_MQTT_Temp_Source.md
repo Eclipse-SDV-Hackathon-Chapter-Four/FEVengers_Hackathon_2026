@@ -2,6 +2,8 @@
 Generated with AI assist
 GitHub Copilot
 
+> **Not the firmware on the board.** This document describes changes to the `app/mqtt` sample of the ThreadX repository; that code is not in this repository. The board is flashed with the application in [`az3166-firmware/`](../az3166-firmware/) (`app/FEVengersApp`), whose buttons and message differ from what is described below. How to build and flash it, and a table of the differences: [`az3166-firmware.md`](az3166-firmware.md).
+
 ## Eclipse SDV Hackathon: FEVengers MQTT Demo
 
 This section documents the FEVengers hackathon changes to the original MXChip AZ3166 MQTT sample in this repository. The `mqtt` build configuration remains based on Eclipse ThreadX and NetX Duo; the additions provide local-broker telemetry, an OLED status display, and button-driven fault injection.
