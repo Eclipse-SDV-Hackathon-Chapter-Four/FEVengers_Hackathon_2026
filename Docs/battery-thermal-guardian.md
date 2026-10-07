@@ -47,16 +47,16 @@ The four faults of the DFM catalog
 (catalog id `battery`) are also reported to the DFM (see
 [DFM reporting](#dfm-reporting)); the transport faults are not in the catalog.
 
-| Fault | DFM catalog id | Class | Meaning | To DFM |
-|---|---|---|---|---|
-| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No data: no message at all within the timeout (board, Wi-Fi or MQTT link lost) | yes |
-| `TempOutOfRange` | `btg.temp.out_of_range` | Signal | Temperature outside the physically plausible range | yes |
-| `TempSignalStuck` | `btg.temp.stuck` | Signal | Data arrives, but the device's rolling counter does not increase (it repeats its last reading) | yes |
-| `TempSignalSpike` | `btg.temp.spike` | Signal | Implausible jump between samples, not confirmed by the next one | yes |
-| `TransportDelay` | – | Transport | Sample arrived later than the allowed end-to-end latency (`max_latency_ms`) | no |
-| `TransportDuplicate` | – | Transport | Same rolling counter as the previous sample | no |
-| `TransportOutOfOrder` | – | Transport | Sample older than one already received | no |
-| `PayloadInvalid` | – | Transport | Message is not a valid VSS sample | no |
+| Fault | DFM catalog id | Class | Meaning |
+|---|---|---|---|
+| `TempSourceConnectionLost` | `btg.src.connection_lost` | Source | No data: no message at all within the timeout (board, Wi-Fi or MQTT link lost) |
+| `TempOutOfRange` | `btg.temp.out_of_range` | Signal | Temperature outside the physically plausible range |
+| `TempSignalStuck` | `btg.temp.stuck` | Signal | Data arrives, but the device's rolling counter does not increase (it repeats its last reading) |
+| `TempSignalSpike` | `btg.temp.spike` | Signal | Implausible jump between samples, not confirmed by the next one |
+| `TransportDelay` | – | Transport | Sample arrived later than the allowed end-to-end latency (`max_latency_ms`) |
+| `TransportDuplicate` | – | Transport | Same rolling counter as the previous sample |
+| `TransportOutOfOrder` | – | Transport | Sample older than one already received |
+| `PayloadInvalid` | – | Transport | Message is not a valid VSS sample |
 
 A sample that raises a transport fault is discarded before the temperature
 checks. How each fault is detected and what it does to the state machine:
