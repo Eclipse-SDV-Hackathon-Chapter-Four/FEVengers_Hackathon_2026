@@ -36,14 +36,13 @@ fn msg(counter: &str, temperature: &str) -> Vec<u8> {
 }
 
 // The real board message: temperature and counter mapped, the other sensor
-// values ignored, first seq = 1.
+// values ignored.
 #[test]
 fn maps_real_board_message() {
     let s = mapper().map(BOARD_MESSAGE).unwrap();
     assert_eq!(s.path, VSS_PATH);
     assert_eq!(s.value, 24.65);
-    assert_eq!(s.rolling_counter, Some(31));
-    assert_eq!(s.seq, 1);
+    assert_eq!(s.rolling_counter, 31);
 }
 
 // Key names come from the config, so a firmware rename needs no code change.
@@ -57,7 +56,7 @@ fn key_names_are_configurable() {
     let s = Mapper::new(cfg, None)
         .map(br#"{"temp": 30.5, "alive": 7}"#)
         .unwrap();
-    assert_eq!((s.value, s.rolling_counter), (30.5, Some(7)));
+    assert_eq!((s.value, s.rolling_counter), (30.5, 7));
 }
 
 // Numbers sent as strings (common in embedded JSON) are accepted.
@@ -65,13 +64,13 @@ fn key_names_are_configurable() {
 fn numeric_strings_are_accepted() {
     let s = mapper().map(&msg("\"12\"", "\"38.25\"")).unwrap();
     assert_eq!(s.value, 38.25);
-    assert_eq!(s.rolling_counter, Some(12));
+    assert_eq!(s.rolling_counter, 12);
 }
 
 // Every way a payload can be unusable gives a specific error naming the key.
 #[test]
 fn missing_or_invalid_fields_are_errors() {
-    let mut m = mapper();
+    let m = mapper();
     assert_eq!(
         m.map(br#"{"counter": 1}"#),
         Err(MappingError::MissingField("temperature_degC".into()))
@@ -119,30 +118,23 @@ fn implausible_temperature_is_forwarded_for_the_guardian_to_judge() {
     assert_eq!(s.value, 500.0);
 }
 
-// seq advances whenever the counter changes (also 255 -> 0) and stays the
-// same when the counter repeats, so the Guardian can see duplicates.
+// The counter is passed through as is, also repeats and the wrap-around:
+// judging them (duplicate, reordering, gaps) is the Guardian's job.
 #[test]
-fn sequence_follows_counter_changes_and_repeats_for_same_counter() {
-    let mut m = mapper();
-    let readings = [
-        ("254", "41.5"),
-        ("254", "41.5"), // re-delivery
-        ("255", "41.5"),
-        ("0", "41.6"), // wrap-around
-        ("0", "41.7"), // frozen counter
-    ];
-    let seqs: Vec<u64> = readings
+fn counter_is_passed_through_unchanged() {
+    let m = mapper();
+    let counters: Vec<u64> = ["254", "254", "255", "0", "3"]
         .iter()
-        .map(|(c, t)| m.map(&msg(c, t)).unwrap().seq)
+        .map(|c| m.map(&msg(c, "41.5")).unwrap().rolling_counter)
         .collect();
-    assert_eq!(seqs, vec![1, 1, 2, 3, 3]);
+    assert_eq!(counters, vec![254, 254, 255, 0, 3]);
 }
 
 // Pins the exact JSON the Guardian expects (its VssSample in contract.rs).
 // If this test has to change, the Guardian has to change too.
 #[test]
 fn output_matches_guardian_input_contract() {
-    let mut m = Mapper::new(MappingConfig::default(), Some("run-7".into()));
+    let m = Mapper::new(MappingConfig::default(), Some("run-7".into()));
     let s = m.map(BOARD_MESSAGE).unwrap();
     let json: serde_json::Value = serde_json::to_value(&s).unwrap();
     assert_eq!(
@@ -150,7 +142,6 @@ fn output_matches_guardian_input_contract() {
         serde_json::json!({
             "path": VSS_PATH,
             "value": 24.65,
-            "seq": 1,
             "rolling_counter": 31,
             "correlation_id": "run-7",
         })

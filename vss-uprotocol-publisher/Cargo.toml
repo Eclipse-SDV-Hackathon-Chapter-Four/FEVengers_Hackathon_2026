@@ -26,7 +26,19 @@ path = "src/lib.rs"
 name = "vss-uprotocol-publisher"
 path = "src/main.rs"
 
+# Test tool: prints the uMessages the publisher sends (no Guardian needed).
+[[bin]]
+name = "vss-listen"
+path = "src/bin/vss_listen.rs"
+
+# Test tool: publishes a temperature profile with an optional injected fault
+# on the publisher's topic, instead of the board and the publisher.
+[[bin]]
+name = "vss-sim"
+path = "src/bin/vss_sim.rs"
+
 [dependencies]
+async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 rumqttc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -39,5 +51,4 @@ up-rust = { version = "0.9.0", default-features = false }
 up-transport-zenoh = "0.9.1"
 
 [dev-dependencies]
-async-trait = "0.1"
 up-rust = { version = "0.9.0", default-features = false, features = ["util"] }

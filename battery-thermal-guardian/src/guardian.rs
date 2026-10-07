@@ -142,10 +142,9 @@ impl Guardian {
         }
         // Evidence link that every event of this step will carry.
         let trigger = SampleRef {
-            seq: sample.seq,
+            rolling_counter: sample.rolling_counter,
             sent_ms,
             value: sample.value,
-            rolling_counter: sample.rolling_counter,
             message_id,
             correlation_id: sample.correlation_id.clone(),
         };
@@ -162,7 +161,7 @@ impl Guardian {
         // Only accepted samples feed the trend and the heartbeat counter.
         if verdict == Verdict::Accepted {
             self.trend.push(sent_ms, sample.value);
-            self.last_rolling_counter = sample.rolling_counter;
+            self.last_rolling_counter = Some(sample.rolling_counter);
         }
 
         // Step 2: react to signal trust (e.g. stuck cleared -> back to MONITORING).

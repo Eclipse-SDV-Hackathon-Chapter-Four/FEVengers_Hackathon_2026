@@ -32,7 +32,7 @@
 //!    `{"pressure_hPa": 1215.87, "temperature_degC": 24.65, ..., "counter": 31}`;
 //!    the broker forwards it; the MQTT event loop in `main.rs` receives it.
 //! 3. [`mapping::Mapper::map`] parses the JSON, takes `temperature_degC` and
-//!    `counter` (ignores the rest), assigns a `seq` and returns a
+//!    `counter` (ignores the rest) and returns a
 //!    [`mapping::VssSample`] for
 //!    `Vehicle.Powertrain.TractionBattery.Temperature.Max`.
 //! 4. [`publisher::VssPublisher::publish`] serializes that sample to JSON,
@@ -46,6 +46,10 @@
 //! - [`config`]: MQTT, mapping and uProtocol settings, loaded from TOML
 //! - [`mapping`]: MQTT payload to VSS sample (pure, no I/O)
 //! - [`publisher`]: VSS sample to uMessage on the uProtocol transport
+//!
+//! Test tools in `src/bin/`: `vss-listen` prints the uMessages on the
+//! publisher's topic; `vss-sim` publishes a simulated temperature profile
+//! with an optional injected fault on that topic, instead of the board.
 
 pub mod config;
 pub mod mapping;

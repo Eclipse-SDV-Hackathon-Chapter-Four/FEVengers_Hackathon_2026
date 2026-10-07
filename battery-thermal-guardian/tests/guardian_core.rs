@@ -40,8 +40,8 @@ struct Harness {
     guardian: Guardian,
     /// Simulated current time.
     now: u64,
-    /// seq of the last sample sent by `sample()`.
-    seq: u64,
+    /// Rolling counter of the last sample sent by `sample()` (0..255).
+    counter: u64,
     /// Every event the Guardian produced so far, in order.
     events: Vec<GuardianEvent>,
 }
@@ -55,36 +55,35 @@ impl Harness {
         Self {
             guardian: Guardian::new(cfg, T0),
             now: T0,
-            seq: 0,
+            counter: 0,
             events: Vec::new(),
         }
     }
 
-    /// Delivers one sample with full control over seq and send time, without
-    /// advancing time. Used to craft duplicates, reordering and delays.
+    /// Delivers one sample with full control over counter and send time,
+    /// without advancing time. Used to craft duplicates, reordering and delays.
     // `sent_ms` stands in for the creation time in the uMessage id.
-    fn sample_raw(&mut self, seq: u64, sent_ms: u64, value: f64) -> Vec<GuardianEvent> {
+    fn sample_raw(&mut self, counter: u64, sent_ms: u64, value: f64) -> Vec<GuardianEvent> {
         let s = VssSample {
             path: VSS_BATTERY_TEMPERATURE_MAX.into(),
             value,
-            seq,
-            rolling_counter: Some(seq % 256),
+            rolling_counter: counter,
             correlation_id: Some("run-1".into()),
         };
-        // "msg-<seq>" stands in for the uProtocol message ID.
+        // "msg-<counter>" stands in for the uProtocol message ID.
         let ev = self
             .guardian
-            .on_sample(&s, sent_ms, Some(format!("msg-{seq}")), self.now);
+            .on_sample(&s, sent_ms, Some(format!("msg-{counter}")), self.now);
         self.events.extend(ev.clone());
         ev
     }
 
     /// Advances one period, ticks, then delivers one fresh sample.
-    // "Fresh" = next seq, sent now (no transport delay).
+    // "Fresh" = next counter value (8-bit, wraps), sent now (no transport delay).
     fn sample(&mut self, value: f64) -> Vec<GuardianEvent> {
         self.advance(PERIOD_MS);
-        self.seq += 1;
-        self.sample_raw(self.seq, self.now, value)
+        self.counter = (self.counter + 1) % 256;
+        self.sample_raw(self.counter, self.now, value)
     }
 
     /// Moves the clock forward and runs one supervision tick.
@@ -109,14 +108,14 @@ impl Harness {
         let n = ((to - from).abs() / step).ceil() as usize;
         for i in 0..=n {
             let v = from + (to - from).signum() * (step * i as f64).min((to - from).abs());
-            self.sample(v + ripple(self.seq));
+            self.sample(v + ripple(self.counter));
         }
     }
 
     /// Feeds samples around `value` (with ripple) for `ms` milliseconds.
     fn hold(&mut self, value: f64, ms: u64) {
         for _ in 0..ms / PERIOD_MS {
-            self.sample(value + ripple(self.seq));
+            self.sample(value + ripple(self.counter));
         }
     }
 
@@ -154,8 +153,8 @@ impl Harness {
 }
 
 /// +0.1 / -0.1 alternating, so values are never exactly repeated.
-fn ripple(seq: u64) -> f64 {
-    match seq % 2 {
+fn ripple(counter: u64) -> f64 {
+    match counter % 2 {
         0 => 0.1,
         _ => -0.1,
     }
@@ -217,8 +216,7 @@ fn samples_of_other_vss_paths_are_ignored() {
     let s = VssSample {
         path: "Vehicle.Speed".into(),
         value: 500.0,
-        seq: 1,
-        rolling_counter: None,
+        rolling_counter: 1,
         correlation_id: None,
     };
     assert!(h.guardian.on_sample(&s, T0, None, T0).is_empty());
@@ -463,12 +461,12 @@ fn confirmed_fast_change_is_accepted() {
 
 // ---------------------------------------------------------------- transport faults
 
-// The last sample is delivered again (same seq): DUPLICATE, no state change.
+// The last sample is delivered again (same counter): DUPLICATE, no state change.
 #[test]
 fn duplicate_is_rejected_and_heals() {
     let mut h = Harness::new().monitoring();
-    let seq = h.seq;
-    h.sample_raw(seq, h.now, 30.0);
+    let counter = h.counter;
+    h.sample_raw(counter, h.now, 30.0);
     assert_eq!(
         h.faults(),
         vec![(FaultKind::TransportDuplicate, FaultStatus::Raised)]
@@ -481,37 +479,54 @@ fn duplicate_is_rejected_and_heals() {
     assert!(h.states().is_empty());
 }
 
-// An older sample (lower seq, sent earlier) arrives after a newer one.
+// An older sample (lower counter, sent earlier) arrives after a newer one.
 #[test]
 fn out_of_order_sample_is_rejected() {
     let mut h = Harness::new().monitoring();
-    let (seq, ts) = (h.seq, h.now);
+    let (counter, ts) = (h.counter, h.now);
     h.sample(30.0);
-    h.sample_raw(seq - 1, ts - PERIOD_MS, 30.0);
+    h.sample_raw(counter - 1, ts - PERIOD_MS, 30.0);
     assert_eq!(
         h.faults(),
         vec![(FaultKind::TransportOutOfOrder, FaultStatus::Raised)]
     );
 }
 
-// seq starts again at 1 but the message was sent later: the publisher restarted.
+// The counter starts again at 0 but the message was sent later: the device
+// restarted. Accepted, not out of order.
 #[test]
-fn publisher_restart_is_not_out_of_order() {
+fn device_restart_is_not_out_of_order() {
     let mut h = Harness::new().monitoring();
+    h.hold(30.0, 10 * PERIOD_MS);
     h.advance(PERIOD_MS);
-    h.sample_raw(1, h.now, 30.0);
+    h.sample_raw(0, h.now, 30.0);
     assert!(h.faults().is_empty());
+    assert_eq!(h.guardian.heartbeat(h.now).rolling_counter, Some(0));
 }
 
-// A sample 1500 ms old on arrival (> max_latency_ms 1000): DELAY. Its seq
-// also skips one number, which is counted as one missing sample.
+// 255 -> 0 is the next reading, not a jump back; 254 -> 1 means 2 lost readings.
+#[test]
+fn counter_wrap_around_is_in_order_and_gaps_are_counted() {
+    let mut h = Harness::new().monitoring();
+    h.counter = 253;
+    h.hold(30.0, 3 * PERIOD_MS); // 254, 255, 0
+    assert!(h.faults().is_empty());
+    assert_eq!(h.guardian.heartbeat(h.now).counters.missing, 0);
+    h.counter = 2; // next sample has counter 3: readings 1 and 2 are missing
+    h.sample(30.0);
+    assert!(h.faults().is_empty());
+    assert_eq!(h.guardian.heartbeat(h.now).counters.missing, 2);
+}
+
+// A sample 1500 ms old on arrival (> max_latency_ms 1000): DELAY. Its counter
+// also skips one value, which is counted as one missing reading.
 #[test]
 fn delayed_sample_is_rejected_and_counted_missing_on_gap() {
     let mut h = Harness::new().monitoring();
     // Sample produced 500 ms after the previous one, but delivered 1500 ms late.
     h.silence(2000);
-    h.seq += 2;
-    h.sample_raw(h.seq, h.now - 1500, 30.0);
+    h.counter += 2;
+    h.sample_raw(h.counter, h.now - 1500, 30.0);
     assert_eq!(
         h.faults(),
         vec![(FaultKind::TransportDelay, FaultStatus::Raised)]
@@ -563,7 +578,7 @@ fn signal_loss_during_mitigation_keeps_mitigation_and_escalates() {
     );
 }
 
-// The CLEAR -> MONITORING event points at the 3rd sample: its seq, message ID
+// The CLEAR -> MONITORING event points at the 3rd sample: its counter, message ID
 // and correlation ID (the evidence link).
 #[test]
 fn events_reference_triggering_sample() {
@@ -575,7 +590,7 @@ fn events_reference_triggering_sample() {
         panic!("expected state event, got {ev:?}");
     };
     let trigger = s.trigger.as_ref().unwrap();
-    assert_eq!(trigger.seq, 3);
+    assert_eq!(trigger.rolling_counter, 3);
     assert_eq!(trigger.message_id.as_deref(), Some("msg-3"));
     assert_eq!(trigger.correlation_id.as_deref(), Some("run-1"));
 }
@@ -643,12 +658,11 @@ fn heartbeat_reports_rolling_counter_of_last_accepted_sample() {
 // duplicate, nothing is accepted -> STALE -> DEGRADED.
 #[test]
 fn frozen_device_counter_ends_in_degraded() {
-    // The publisher keeps the seq while the rolling counter does not move.
     let mut h = Harness::new().monitoring();
-    let seq = h.seq;
+    let counter = h.counter;
     for _ in 0..8 {
         h.advance(PERIOD_MS);
-        h.sample_raw(seq, h.now, 30.0);
+        h.sample_raw(counter, h.now, 30.0);
     }
     assert_eq!(h.guardian.state(), Degraded);
     assert_eq!(

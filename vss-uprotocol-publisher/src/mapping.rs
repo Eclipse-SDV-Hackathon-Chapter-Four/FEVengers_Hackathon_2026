@@ -32,7 +32,7 @@
 //! MQTT in : {"pressure_hPa": 1215.87, "temperature_degC": 24.65,
 //!            "humidity_perc": 54.11, ..., "counter": 31}
 //! VSS out : {"path": "Vehicle.Powertrain.TractionBattery.Temperature.Max",
-//!            "value": 24.65, "seq": 9, "rolling_counter": 31}
+//!            "value": 24.65, "rolling_counter": 31}
 //! ```
 
 use std::fmt;
@@ -50,11 +50,9 @@ pub struct VssSample {
     pub path: String,
     /// Temperature in Celsius, exactly as the board sent it.
     pub value: f64,
-    /// Our own sequence number (see `Mapper::map` for how it advances).
-    pub seq: u64,
-    /// The board's rolling counter, passed through unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rolling_counter: Option<u64>,
+    /// The board's rolling counter, passed through unchanged. The Guardian
+    /// uses it to detect duplicates, reordering and lost readings.
+    pub rolling_counter: u64,
     /// Test-run ID from `--correlation-id`, if given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
@@ -85,15 +83,11 @@ impl fmt::Display for MappingError {
 
 impl std::error::Error for MappingError {}
 
-/// Turns MQTT payloads into VSS samples. Keeps a little state between
-/// messages to assign sequence numbers.
+/// Turns MQTT payloads into VSS samples. Stateless: each message is mapped
+/// on its own.
 pub struct Mapper {
     cfg: MappingConfig,
     correlation_id: Option<String>,
-    /// seq of the last produced sample.
-    seq: u64,
-    /// Rolling counter of the last mapped reading.
-    last_counter: Option<u64>,
 }
 
 impl Mapper {
@@ -101,13 +95,11 @@ impl Mapper {
         Self {
             cfg,
             correlation_id,
-            seq: 0,
-            last_counter: None,
         }
     }
 
     /// Maps one MQTT payload.
-    pub fn map(&mut self, payload: &[u8]) -> Result<VssSample, MappingError> {
+    pub fn map(&self, payload: &[u8]) -> Result<VssSample, MappingError> {
         // 1. Parse: must be a JSON object. Values are kept as raw JSON and
         //    converted by hand, so `24.65` and `"24.65"` are both accepted
         //    and every problem gets a clear error message.
@@ -120,22 +112,11 @@ impl Mapper {
         let counter_key = &self.cfg.counter_field;
         let counter = rolling_counter(counter_key, field(&reading, counter_key)?)?;
 
-        // 3. Sequence number.
-        // A repeated counter is a re-delivery (e.g. MQTT QoS 1 retry) or a
-        // frozen device: keep the sequence number so the Guardian sees a
-        // duplicate instead of fresh data. Any other value, including the
-        // wrap-around of the counter, is a new reading.
-        if self.last_counter != Some(counter) {
-            self.seq += 1;
-            self.last_counter = Some(counter);
-        }
-
-        // 4. Build the VSS sample (the uMessage is built in publisher.rs).
+        // 3. Build the VSS sample (the uMessage is built in publisher.rs).
         Ok(VssSample {
             path: self.cfg.vss_path.clone(),
             value,
-            seq: self.seq,
-            rolling_counter: Some(counter),
+            rolling_counter: counter,
             correlation_id: self.correlation_id.clone(),
         })
     }

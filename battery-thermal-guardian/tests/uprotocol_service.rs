@@ -114,12 +114,11 @@ async fn guardian_consumes_vss_and_publishes_events_over_uprotocol() {
     // Publish as the VSS publisher: //vehicle/8001/1/8001.
     let start_ms = now_ms();
     let topic = StaticUriProvider::new("vehicle", 0x8001, 1).get_resource_uri(0x8001);
-    for seq in 1..=4 {
+    for counter in 1..=4 {
         let sample = VssSample {
             path: VSS_BATTERY_TEMPERATURE_MAX.into(),
-            value: 30.0 + seq as f64 * 0.1,
-            seq,
-            rolling_counter: Some(seq),
+            value: 30.0 + counter as f64 * 0.1,
+            rolling_counter: counter,
             correlation_id: Some("it-1".into()),
         };
         publish(&transport, &topic, serde_json::to_vec(&sample).unwrap()).await;
@@ -141,7 +140,7 @@ async fn guardian_consumes_vss_and_publishes_events_over_uprotocol() {
         (GuardianState::Clear, GuardianState::Monitoring)
     );
     let trigger = states[0].trigger.as_ref().unwrap();
-    assert_eq!(trigger.seq, 3);
+    assert_eq!(trigger.rolling_counter, 3);
     assert!(
         trigger.message_id.is_some(),
         "uProtocol message id must be propagated"
@@ -167,6 +166,5 @@ async fn guardian_consumes_vss_and_publishes_events_over_uprotocol() {
     assert_eq!(last.state, GuardianState::Monitoring);
     assert_eq!(last.counters.accepted, 4);
     assert_eq!(last.rolling_counter, Some(4));
-    assert_eq!(trigger.rolling_counter, Some(3));
     assert!(heartbeats.windows(2).all(|w| w[0].seq < w[1].seq));
 }

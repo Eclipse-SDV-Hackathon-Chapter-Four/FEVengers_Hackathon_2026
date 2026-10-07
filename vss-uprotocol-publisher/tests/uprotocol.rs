@@ -55,7 +55,7 @@ async fn reading_is_published_as_json_umessage_on_guardian_input_topic() {
 
     // Same steps as main.rs does for every MQTT message: map, then publish.
     let publisher = VssPublisher::new(transport.clone(), &UProtocolConfig::default());
-    let mut mapper = Mapper::new(MappingConfig::default(), None);
+    let mapper = Mapper::new(MappingConfig::default(), None);
     let sample = mapper
         .map(br#"{"temperature_degC": 41.5, "counter": 1}"#)
         .unwrap();

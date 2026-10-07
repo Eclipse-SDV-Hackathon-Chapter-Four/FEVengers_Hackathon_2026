@@ -61,13 +61,10 @@ pub struct VssSample {
     pub path: String,
     /// Value in the VSS unit of the signal (celsius for temperatures).
     pub value: f64,
-    /// Per-signal sequence number, incremented by the publisher for every sample.
-    // Used to detect duplicates, reordering and gaps (see signal.rs).
-    pub seq: u64,
-    /// Rolling (alive) counter of the source device, if it provides one.
-    /// Passed through for diagnostics and reported in the heartbeat.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rolling_counter: Option<u64>,
+    /// Rolling (alive) counter of the source device: +1 per reading, back to
+    /// 0 after `signal.counter_modulus - 1` (255 for the AZ3166).
+    // Used to detect duplicates, reordering and lost readings (see signal.rs).
+    pub rolling_counter: u64,
     /// Optional campaign / test-run identifier, echoed in every event it triggers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
@@ -150,7 +147,7 @@ impl FaultKind {
 
     /// Fault id in the DFM catalog `battery_guardian_catalog.json`, or `None`
     /// for Guardian-internal faults that are not reported to the DFM.
-    // A DFM bridge forwards exactly the faults with Some(id), using this id.
+    // dfm.rs reports exactly the faults with Some(id) to the DFM, using this id.
     pub fn catalog_id(self) -> Option<&'static str> {
         match self {
             FaultKind::TempSourceConnectionLost => Some("btg.src.connection_lost"),
@@ -225,12 +222,10 @@ pub enum MitigationStatus {
 // go back to the exact input message (message_id) and test run (correlation_id).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleRef {
-    pub seq: u64,
+    pub rolling_counter: u64,
     /// When the publisher created the uMessage (from its UUIDv7 id), ms since epoch.
     pub sent_ms: u64,
     pub value: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rolling_counter: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,7 +291,7 @@ pub struct Counters {
     pub accepted: u64,
     /// Samples discarded by a check (each one raised or refreshed a fault).
     pub rejected: u64,
-    /// Samples missing according to gaps in the sequence numbers.
+    /// Readings missing according to gaps in the rolling counter.
     pub missing: u64,
 }
 

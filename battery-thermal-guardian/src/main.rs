@@ -34,6 +34,9 @@ struct Args {
     /// Zenoh configuration (JSON5), overrides `uprotocol.zenoh_config`.
     #[arg(long)]
     zenoh_config: Option<String>,
+    /// DFM fault catalog (JSON), overrides `dfm.catalog`; enables DFM reporting.
+    #[arg(long)]
+    dfm_catalog: Option<PathBuf>,
 }
 
 // `#[tokio::main]` starts the async runtime and runs `main` inside it.
@@ -50,6 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     if args.zenoh_config.is_some() {
         cfg.uprotocol.zenoh_config = args.zenoh_config;
+    }
+    if args.dfm_catalog.is_some() {
+        cfg.dfm.catalog = args.dfm_catalog;
     }
 
     // Open the uProtocol transport (Zenoh underneath) under our authority name.
