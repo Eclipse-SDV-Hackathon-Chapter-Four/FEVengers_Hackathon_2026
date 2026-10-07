@@ -2,6 +2,8 @@
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
+> **Historical.** The dummy Guardian described here was used to set and clear the four faults by hand before the real Battery Thermal Guardian reported to the DFM itself. Its code (`dummy_errortrigger/dummy-guardian/`) was removed from the repository on 7 October 2026, so the build and run commands below no longer work. The code is in the git history up to commit `0fda212` (`git show 0fda212:<path>`). To trigger faults now: the buttons of the AZ3166 board, or a test MQTT message (see [`BUILD_IMAGES.md`](BUILD_IMAGES.md)).
+
 A stand-in for the Battery Thermal Guardian. Instead of monitoring temperature, it sets and clears the four Guardian faults on command and reports them to the Eclipse OpenSOVD **DFM**, using the same reporting code the real Guardian will use.
 
 To see the reported faults, run the DFM and SOVD fault bridge first: see [`FAULT_CHAIN.md`](FAULT_CHAIN.md).

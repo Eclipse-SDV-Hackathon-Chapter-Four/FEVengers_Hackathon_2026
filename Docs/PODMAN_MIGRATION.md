@@ -2,6 +2,8 @@
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
+> **Partly historical.** The SOVD fault bridge and the dummy Guardian were used until the OpenSOVD gateway and the real Guardian replaced them. Their code was removed from the repository on 7 October 2026, so the steps below that transfer or start `sovd-fault-bridge` or `dummy-guardian` no longer work. The code is in the git history up to commit `0fda212` (`git show 0fda212:<path>`). The DFM and gateway steps are still valid; the scripted way to do the same is in [`BUILD_IMAGES.md`](BUILD_IMAGES.md).
+
 How to move the fault chain containers (DFM, SOVD fault bridge, dummy Guardian, OpenSOVD gateway), the fault catalog, the web UI and the table script from the Ubuntu laptop into the AutoSD QEMU VM, and run them there.
 
 The OpenSOVD gateway (section 8) replaces the SOVD fault bridge. The bridge sections stay for reference.

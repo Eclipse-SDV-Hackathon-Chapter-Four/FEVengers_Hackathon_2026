@@ -2,6 +2,8 @@
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
+> **Partly historical.** This chain was first run with the SOVD fault bridge and the dummy Guardian. Both were used until the OpenSOVD gateway and the real Guardian replaced them, and their code was removed from the repository on 7 October 2026; the steps below that build or start `sovd-fault-bridge` or `dummy-guardian` no longer work. The code is in the git history up to commit `0fda212` (`git show 0fda212:<path>`). The DFM steps are still valid. The chain as it runs today: [`opensovd-gateway-dfm.md`](opensovd-gateway-dfm.md) and [`BUILD_IMAGES.md`](BUILD_IMAGES.md).
+
 How to run the complete fault path and read the Battery Thermal Guardian faults as a table, on the Ubuntu laptop and in AutoSD.
 
 Status: verified end to end on Ubuntu and in AutoSD (x86_64 QEMU) with the dummy Guardian in interactive mode.

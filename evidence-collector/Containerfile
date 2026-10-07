@@ -3,7 +3,7 @@
 #   podman build -t localhost/evidence-collector:dev -f Containerfile .
 
 # ---- Build stage ----
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml ./
 COPY src src

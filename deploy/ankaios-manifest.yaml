@@ -87,7 +87,7 @@ workloads:
   # SOVD path /sovd/v1/apps/battery/faults and the fault monitor page on /ui/.
   # Port 7690 is the one of the architecture diagram; autosd.sh forwards it to
   # the host. "--dfm-fault-app battery" must equal the id of the fault catalog.
-  # It replaces the standalone SOVD fault bridge (sovd/sovd-fault-bridge).
+  # It replaced the standalone SOVD fault bridge, which is no longer in the repository.
   opensovd-gateway:
     runtime: podman
     agent: agent_A

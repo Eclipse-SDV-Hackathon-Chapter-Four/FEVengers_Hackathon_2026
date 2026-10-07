@@ -45,9 +45,26 @@ All services are compiled inside containers, so the host needs no Rust toolchain
 | Fault campaign runner (skeleton, optional) | `localhost/fault-campaign-runner:dev` | `fault-campaign-runner/` |
 | Evidence collector (skeleton, optional) | `localhost/evidence-collector:dev` | `evidence-collector/` |
 
-The two skeletons are empty Rust programs: they build and print `not implemented yet`, nothing more; `src/main.rs` in each lists what is to be implemented. They are marked `optional` in the table: built only when named (`./deploy/build-images.sh evidence`) or with `--all`, because they are not deployed yet. The old SOVD fault bridge (`sovd/sovd-fault-bridge/`) is no longer built; the OpenSOVD gateway replaced it.
+The two skeletons are empty Rust programs: they build and print `not implemented yet`, nothing more; `src/main.rs` in each lists what is to be implemented. They are marked `optional` in the table: built only when named (`./deploy/build-images.sh evidence`) or with `--all`, because they are not deployed yet. The SOVD fault bridge and the dummy Guardian, which were used before the OpenSOVD gateway and the real Guardian's DFM reporting existed, are no longer in the repository.
 
 The MQTT broker is not built; it is the stock `docker.io/library/eclipse-mosquitto:2`.
+
+### Rust and fault-lib versions
+
+Every service is compiled with the same compiler, and everything that talks to the DFM uses the same fault-lib commit:
+
+| | Version | Where it is set |
+|---|---|---|
+| Rust compiler | 1.99.0 | `FROM docker.io/library/rust:1.99.0-bookworm` in every `Containerfile` |
+| fault-lib (`fault_lib`, `dfm_lib`, `common`) | commit `12dac502` | `Cargo.toml` of the Guardian; `FAULTLIB_REV` in the `Containerfile` of the DFM and of the gateway |
+
+fault-lib and the gateway's sources ask for a nightly compiler in their `rust-toolchain.toml`. They use no nightly-only feature, so the DFM and gateway `Containerfile` override that with `RUSTUP_TOOLCHAIN=1.99.0`. To move to a newer compiler, change the image tag and that variable everywhere at once; to move to a newer fault-lib, change the commit in all three places, because the DFM, the Guardian and the gateway must agree on the message format.
+
+To trigger a fault without the board, publish a reading the Guardian rejects, with a counter that follows the last one:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 -t 'FEVengers_MQTT/telemetry' -m '{"temperature_degC": 500, "counter": 1}'
+```
 
 Each image is also saved as `build/images/<name>.tar` (`build/` is git-ignored). These archives are what `deploy-to-autosd.sh` loads on the AutoSD target.
 
@@ -101,7 +118,7 @@ The Podman options come from `battery-thermal-guardian.md`, `FAULT_CHAIN.md` and
 | Catalog and web page on the target | `/root/catalogs`, `/root/webui` | `/var/lib/fevengers/catalogs`, `/var/lib/fevengers/webui` | One folder for everything the deployment puts on the target |
 | Reaching port 7690 from the laptop | SSH tunnel | `autosd/autosd.sh` forwards 7690 | No tunnel needed: `http://localhost:7690/ui/` |
 | Who starts the containers | `podman run`, `--restart=always` | Ankaios workloads | Come back after a reboot, one manifest |
-| Fault reporter | `dummy-guardian` | The real Guardian | `dummy-guardian` is not deployed; it can still be started by hand next to it |
+| Fault reporter | `dummy-guardian` (removed from the repository) | The real Guardian | Faults come from real data: the board's buttons, or a test MQTT message |
 
 The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localhost:1883`. That is the topic the board firmware publishes on (`MQTT_CLIENT_NAME "/telemetry"` with client name `FEVengers_MQTT`, see `Threadx_AZ3166_MQTT_Temp_Source.md`).
 
@@ -167,7 +184,7 @@ What it does, in order:
 |---|---|
 | Load images | Only the `localhost/*` images whose archive in `build/images/` holds another build than the target has stored. The image id is read from the archive with `tar` and compared with the id on the target, so nothing is transferred when nothing changed |
 | Prepare the target | Creates `/tmp/iceoryx2`, copies `catalogs/*.json` to `/var/lib/fevengers/catalogs`, the fault monitor page (`opensovd-gateway-dfm/webui/`) to `/var/lib/fevengers/webui` and the fault table script to `/root/faults.sh` |
-| Remove what left the manifest | Workloads running on the target that the manifest no longer lists are deleted (for example the SOVD fault bridge after the gateway replaced it) |
+| Remove what left the manifest | Workloads running on the target that the manifest no longer lists are deleted (as happened to the former SOVD fault bridge when the gateway replaced it) |
 | Restart workloads | Only the workloads of the images that were loaded, plus any of ours that exist but do not run. If one of them is a workload others depend on (the DFM), all of ours restart and stale iceoryx2 files are cleared, because the others hold connections to the old instance. Then the manifest is applied, which starts what is missing. `--restart` restarts all of ours regardless |
 | Wait | Up to 60 s until every workload is `Running(Ok)`; fails otherwise |
 
@@ -211,5 +228,8 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | Deploy after the DFM image changed | Run: loads the DFM and restarts all four of ours (16 s) |
 | `--restart` with nothing changed | Run: loads nothing, restarts all four |
 | `check` with a newer archive than the target runs | Run: reports `outdated` and exits non-zero |
+| All services on Rust 1.99.0, DFM at fault-lib `12dac502` | Run: all four images build, with no nightly and no toolchain download in the build output. The DFM, built with a nightly before, compiles with 1.99.0 and its `Cargo.lock` unchanged |
+| Unit tests with Rust 1.99.0 (`cargo test --locked` in a throwaway container) | Run: Guardian 35 of 35 passed, publisher 8 of 8 passed |
+| DFM built with another compiler than before, against the unchanged Guardian and gateway | Run on AutoSD: the Guardian connects to the DFM, the gateway attaches, and an injected 500 °C reading shows up as `btg.temp.out_of_range` (`testFailed` true, count 1) and heals after five valid readings |
 | Restart of the image with the gateway in the startup manifest | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |
