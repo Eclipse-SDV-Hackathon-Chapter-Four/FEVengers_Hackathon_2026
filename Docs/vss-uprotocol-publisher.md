@@ -195,10 +195,10 @@ To run it with the Guardian, see
 Topic `FEVengers_MQTT/telemetry` (configurable), one JSON object per second:
 
 ```json
-{"pressure_hPa":1215.87,"temperature_degC":24.65,"humidity_perc":54.11,
- "acceleration_mg":[-38.43,13.85,1011.26],"magnetic_mG":[-91.50,-99.00,-384.00],
- "counter":31}
+{"temperature_degC": 24.65, "counter": 31}
 ```
+
+This is what the board's firmware sends ([`az3166-firmware.md`](az3166-firmware.md)).
 
 Two keys are used; their names are set in `[mapping]` (`temperature_field`,
 `counter_field`):

@@ -42,7 +42,7 @@ evidence. The stages are built on Eclipse SDV projects:
 
 | Stage | Component | Built on | Docs |
 |---|---|---|---|
-| Source | AZ3166 board: temperature sensor, MQTT telemetry, fault injection buttons | Eclipse ThreadX, Eclipse Mosquitto | [AZ3166 firmware](Docs/Threadx_AZ3166_MQTT_Temp_Source.md) |
+| Source | AZ3166 board: temperature sensor, MQTT telemetry, fault injection buttons | Eclipse ThreadX, Eclipse Mosquitto | [AZ3166 firmware](Docs/az3166-firmware.md) |
 | Publish | VSS uProtocol publisher: MQTT reading → VSS signal → uMessage | Eclipse uProtocol, Eclipse Zenoh | [VSS uProtocol publisher](Docs/vss-uprotocol-publisher.md) |
 | Evaluate | Battery Thermal Guardian: signal trust checks, thermal state machine, mitigations | Eclipse uProtocol, Eclipse Zenoh | [Battery Thermal Guardian](Docs/battery-thermal-guardian.md) |
 | Diagnose | Diagnostic Fault Manager and SOVD REST gateway | Eclipse OpenSOVD, Eclipse iceoryx | [DFM](Docs/DFM_BRINGUP.md), [OpenSOVD gateway](Docs/opensovd-gateway-dfm.md), [fault chain](Docs/FAULT_CHAIN.md) |
@@ -69,7 +69,7 @@ The Guardian reports four faults and requests two mitigations
 ```mermaid
 flowchart LR
   subgraph EDGE["AZ3166 · Eclipse ThreadX"]
-    S[LPS22HB<br/>temperature sensor] --> T[Telemetry app<br/>JSON · rolling counter<br/>buttons A/B: fault injection]
+    S[HTS221<br/>temperature sensor] --> T[Telemetry app<br/>JSON · rolling counter<br/>buttons A/B: fault injection]
     T --> N[NetX Duo<br/>Wi-Fi · MQTT client]
   end
   subgraph HOST["Linux x86_64 host · QEMU/KVM"]
@@ -94,10 +94,10 @@ does not know about the evidence collector, which only listens.
 
 ### One temperature reading
 
-1. The AZ3166 reads the LPS22HB sensor once per second and publishes
+1. The AZ3166 reads the HTS221 sensor once per second and publishes
    `{"temperature_degC": …, "counter": …}` over MQTT. The `counter` is an
    8-bit rolling counter, +1 per reading
-   ([firmware](Docs/Threadx_AZ3166_MQTT_Temp_Source.md)).
+   ([firmware](Docs/az3166-firmware.md)).
 2. Mosquitto receives it; the **VSS publisher** maps it to the VSS signal
    `Vehicle.Powertrain.TractionBattery.Temperature.Max` and publishes it as a
    uMessage on `//vehicle/8001/1/8001`
@@ -138,14 +138,19 @@ copy of the raw stream and its own limits, not from the Guardian.
 ### Fault injection
 
 The board's buttons inject faults into the temperature and the rolling
-counter it publishes; see the [AZ3166 firmware](Docs/Threadx_AZ3166_MQTT_Temp_Source.md).
+counter it publishes. A fault is active only while the button is held; see
+the [AZ3166 firmware](Docs/az3166-firmware.md#buttons-fault-injection).
 
-| Button | Board sends | Guardian reaction |
+| Held | Board sends | Guardian reaction |
 |---|---|---|
-| A | fixed 85 °C, counter keeps increasing | Jump flagged as `TempSignalSpike`, confirmed by the next sample; then WARNING → CRITICAL → `REDUCE_POWER_MAX_COOLING` |
-| B | value and counter frozen | `TempSignalStuck` after 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING` |
-| A + B | measured value + 20 °C, held | Jump flagged as `TempSignalSpike` |
+| A | value and counter frozen (STUCK) | Every repeat is a `TransportDuplicate`; `TempSignalStuck` after 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING` |
+| B | nothing (DROPOUT) | `TempSourceConnectionLost` after 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING` |
+| A + B | +20 °C per reading up to 160 °C, then held (OUT OF RANGE) | Each step is faster than 10 °C/s and is discarded as `TempSignalSpike`; above 150 °C the readings are discarded as `TempOutOfRange`. No reading accepted for 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING` |
 | Board off / Wi-Fi lost | nothing | `TempSourceConnectionLost` after 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING` |
+
+The Guardian discards the injected readings, so none of the buttons drives
+it to WARNING or CRITICAL. To show that path, send a slow rise instead, for
+example with `vss-sim` ([without the board](Docs/battery-thermal-guardian.md#without-the-board-or-the-publisher)).
 
 ### Build and deploy
 
@@ -182,13 +187,13 @@ host (`./deploy/install-build-deps.sh`).
 
 | Component | Language | Main dependencies | Image |
 |---|---|---|---|
-| [`vss-uprotocol-publisher`](vss-uprotocol-publisher/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, `rumqttc` 0.25, `tokio` | `rust:1-bookworm` → `debian:bookworm-slim` |
-| [`battery-thermal-guardian`](battery-thermal-guardian/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, OpenSOVD `fault-lib` (commit `12dac50`, iceoryx2; build needs `clang`/`libclang`) | `rust:1-bookworm` → `debian:bookworm-slim` |
-| [`evidence-collector`](evidence-collector/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, `axum` 0.7, `reqwest` 0.12 | `rust:1-bookworm` → `debian:bookworm-slim` |
-| [`dfm-container`](dfm-container/) | Rust | OpenSOVD `fault-lib` (`dfm_bin`), built from source | `rust:1-bookworm` → `debian:bookworm-slim` |
-| [`opensovd-gateway-dfm`](opensovd-gateway-dfm/) | Rust | OpenSOVD `opensovd-core` (commit `1bf4c47`) with `fault-lib` (`12dac50`), built from source | `rust:1-bookworm` → `debian:bookworm-slim` |
+| [`vss-uprotocol-publisher`](vss-uprotocol-publisher/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, `rumqttc` 0.25, `tokio` | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
+| [`battery-thermal-guardian`](battery-thermal-guardian/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, OpenSOVD `fault-lib` (commit `12dac50`, iceoryx2; build needs `clang`/`libclang`) | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
+| [`evidence-collector`](evidence-collector/) | Rust | `up-rust` 0.9, `up-transport-zenoh` 0.9.1, `axum` 0.7, `reqwest` 0.12 | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
+| [`dfm-container`](dfm-container/) | Rust | OpenSOVD `fault-lib` (`dfm_bin`), built from source | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
+| [`opensovd-gateway-dfm`](opensovd-gateway-dfm/) | Rust | OpenSOVD `opensovd-core` (commit `1bf4c47`) with `fault-lib` (`12dac50`), built from source | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
 | mqtt-broker | – | Eclipse Mosquitto 2 | `eclipse-mosquitto:2` |
-| [AZ3166 firmware](Docs/Threadx_AZ3166_MQTT_Temp_Source.md) | C | Eclipse ThreadX, NetX Duo, MXChip AZ3166 MQTT sample | – (flashed to the board) |
+| [`az3166-firmware`](az3166-firmware/) | C | Eclipse ThreadX and NetX Duo (git submodules), the MXChip AZ3166 folder of `eclipse-threadx/samplex` with our application `FEVengersApp` | – (flashed to the board) |
 
 The Rust services share one contract: the payloads in
 [`battery-thermal-guardian/src/contract.rs`](battery-thermal-guardian/src/contract.rs)
@@ -199,7 +204,7 @@ which the Guardian, the DFM and the gateway load from the same file.
 
 | Environment | What runs there | Requirements |
 |---|---|---|
-| **Edge device** | AZ3166 with the ThreadX firmware | Same Wi-Fi as the host; broker address = host's Wi-Fi IP, port 1883, compiled into the firmware ([firmware](Docs/Threadx_AZ3166_MQTT_Temp_Source.md), [MQTT data from the board](Docs/AutosdSetup.md#mqtt-data-from-the-board)) |
+| **Edge device** | AZ3166 with the ThreadX firmware | Same Wi-Fi as the host; broker address = host's Wi-Fi IP, port 1883, compiled into the firmware ([firmware](Docs/az3166-firmware.md), [MQTT data from the board](Docs/AutosdSetup.md#mqtt-data-from-the-board)) |
 | **Host** | QEMU/KVM with the AutoSD image; image build | Linux x86_64 (tested: Ubuntu 22.04), KVM, QEMU, OVMF, OpenSSH ≥ 8.4, Podman or Docker ([details](Docs/AutosdSetup.md#2-programs-on-your-machine)) |
 | **Target** | AutoSD (bootc QEMU image) with Ankaios (`ank-server`, `ank-agent`) and Podman; the workloads `mqtt-broker`, `vss-publisher`, `guardian`, `dfm`, `opensovd-gateway` and the evidence collector | SELinux enforcing (`label=disable` for shared mounts); host network for Zenoh; `--ipc=host`, `--pid=host`, `/dev/shm` and `/tmp/iceoryx2` shared for iceoryx2 between `guardian`, `dfm` and `opensovd-gateway`; IPv4-only Zenoh configuration ([Ankaios manifest](Docs/BUILD_IMAGES.md#4-ankaios-manifest)) |
 | **Development** | Publisher, Guardian and a Mosquitto container directly on one Linux machine, without AutoSD | Rust toolchain, `clang`/`libclang` for the Guardian ([how](Docs/battery-thermal-guardian.md#on-one-machine-development)) |
@@ -211,33 +216,44 @@ Network between host and target (QEMU port forwards, see [ports](Docs/AutosdSetu
 | 2222 | SSH 22 | Shell and deployment scripts |
 | 1883 | Mosquitto | MQTT from the board |
 | 7690 | OpenSOVD gateway | SOVD REST and fault monitor page |
-| 8700 (SSH tunnel) | Evidence collector 7700 | Evidence web UI |
+| 7700 | Evidence collector | Evidence web UI and REST |
 
 ## Getting started
 
-From the repository root, with the AutoSD image in [`autosd/`](autosd/)
-([where to get it](Docs/AutosdSetup.md)):
+From the repository root, on a new machine (Ubuntu), one command takes a
+fresh clone to the running system. It installs the packages, downloads the
+AutoSD image into [`autosd/`](autosd/), boots it, installs Ankaios, builds
+the images and starts the six workloads:
 
 ```sh
-./deploy/install-build-deps.sh   # once: container engine
-./autosd/autosd.sh               # start AutoSD with the port forwards
+./deploy/setup-all.sh           # every step that is not done yet
+./deploy/setup-all.sh --check   # only report, change nothing
+```
+
+The same steps one by one ([what each does](Docs/AutosdSetup.md)):
+
+```sh
+./deploy/install-host-deps.sh    # once: QEMU, OVMF, ..., container engine
+./autosd/autosd.sh setup         # once: download the AutoSD image
+./autosd/autosd.sh start         # start AutoSD with the port forwards
 ./deploy/setup-autosd.sh         # once: install Ankaios in the image
 ./deploy/build-images.sh         # build all service images
 ./deploy/deploy-to-autosd.sh     # load them, start the workloads, keep them across reboots
 ```
 
-Then start the evidence collector ([how](Docs/evidence-collector.md#8-build-and-run)),
-point the board at `<host Wi-Fi IP>:1883` (`./autosd/autosd.sh status` prints
-it) and open:
+Then flash the board with the host's Wi-Fi address as broker
+([firmware](Docs/az3166-firmware.md); `./autosd/autosd.sh status` prints the
+address) and open:
 
 | What | Where |
 |---|---|
-| Evidence collector | `ssh -p 2222 -N -L 8700:127.0.0.1:7700 root@localhost`, then `http://localhost:8700/` |
+| Evidence collector | `http://localhost:7700/` |
 | DFM faults over SOVD | `http://localhost:7690/ui/`, REST `http://localhost:7690/sovd/v1/apps/battery/faults` |
 | Empty the fault memory before a run | `./deploy/deploy-to-autosd.sh clear-faults` |
 
 Details: [AutoSD setup](Docs/AutosdSetup.md),
 [build and deploy](Docs/BUILD_IMAGES.md),
+[AZ3166 firmware](Docs/az3166-firmware.md),
 [fault chain](Docs/FAULT_CHAIN.md),
 [Guardian](Docs/battery-thermal-guardian.md),
 [publisher](Docs/vss-uprotocol-publisher.md),
@@ -251,6 +267,7 @@ Tests of the Rust services need no broker, network or DFM:
 
 | Path | Content | Docs |
 |---|---|---|
+| [`az3166-firmware/`](az3166-firmware/) | Firmware of the AZ3166 board (`app/FEVengersApp`); ThreadX and NetX Duo as submodules | [AZ3166 firmware](Docs/az3166-firmware.md) |
 | [`vss-uprotocol-publisher/`](vss-uprotocol-publisher/) | MQTT → VSS → uProtocol publisher; test tool `vss-listen` | [Publisher](Docs/vss-uprotocol-publisher.md) |
 | [`battery-thermal-guardian/`](battery-thermal-guardian/) | The Guardian; test tool `guardian-monitor` | [Guardian](Docs/battery-thermal-guardian.md) |
 | [`evidence-collector/`](evidence-collector/) | Evidence collector with web UI | [Evidence collector](Docs/evidence-collector.md) |
