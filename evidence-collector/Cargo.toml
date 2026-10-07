@@ -1,13 +1,27 @@
-# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
+# Created with AI assistance (Claude Opus 5.5, Anthropic).
 #
-# Evidence collector: links injected fault, Guardian events and diagnostics into a verdict.
-# SKELETON: builds and runs, but does nothing yet.
+# Evidence collector: independent uProtocol subscriber (Guardian events + raw
+# VSS samples) with a web page to start/stop an evidence run. For every fault
+# raised or cleared it stores the triggering sample and the sample before it.
 
 [package]
 name = "evidence-collector"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Evidence collector: links injected fault, Guardian events and diagnostics into a verdict. (skeleton)"
+description = "Evidence collector for the Battery Thermal Guardian (uProtocol subscriber + web UI)"
 license = "EPL-2.0"
 
 [dependencies]
+async-trait = "0.1"
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Same uProtocol versions as the Guardian and the VSS publisher
+up-rust = { version = "0.9.0", default-features = false }
+up-transport-zenoh = "0.9.1"
