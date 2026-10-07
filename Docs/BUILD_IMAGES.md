@@ -155,5 +155,7 @@ Without `--persist` the workloads exist only in the Ankaios server's memory; aft
 | `build-images.sh` with Docker, or on an ARM host | Not tested |
 | `setup-autosd.sh --check`, `deploy-to-autosd.sh status` | Run against the QEMU image |
 | `setup-autosd.sh`, install path | Not run. The install steps are the ones recorded for our QEMU image, where they worked by hand |
-| `deploy-to-autosd.sh`, deploy and `--persist` | Not run yet |
-| `ankaios-manifest.yaml` | Parses as YAML; not applied to an AutoSD system |
+| `deploy-to-autosd.sh` (without `--persist`) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
+| `deploy-to-autosd.sh --persist` | Not run yet |
+| Data from the board through to the Guardian | Not seen yet: without board data the Guardian is `DEGRADED` (`TempSourceConnectionLost`), as designed |
+| `ankaios-manifest.yaml` | Applied by the deploy above |

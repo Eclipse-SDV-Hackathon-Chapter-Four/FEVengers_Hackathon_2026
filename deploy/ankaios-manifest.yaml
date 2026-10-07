@@ -4,8 +4,8 @@
 # Docs/Static_View.png. The localhost/*:dev images are produced by
 # deploy/build-images.sh and must be loaded on the target before this is applied.
 #
-# NOT TESTED YET: written from the podman commands documented in
-# Docs/FAULT_CHAIN.md and Docs/SOVD_Bridge_Fault.md, but not applied to an AutoSD system.
+# Applied to the QEMU image with deploy/deploy-to-autosd.sh: all five
+# workloads reach Running(Ok) and the SOVD interface answers on port 7690.
 #
 # The target must provide (lost on reboot unless recreated, /tmp is a tmpfs):
 #   /tmp/iceoryx2                 iceoryx2 discovery files, shared by dfm and sovd-bridge
