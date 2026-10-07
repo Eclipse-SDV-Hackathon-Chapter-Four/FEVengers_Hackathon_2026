@@ -106,7 +106,7 @@ AZ3166 --Wi-Fi--> <this machine>:1883 --QEMU forward--> AutoSD:1883 (mqtt-broker
 | Nothing else on host port 1883 | With a local Mosquitto on 1883 the board talks to that one and nothing reaches AutoSD. Starting stops it; to keep it from coming back at boot: `sudo systemctl disable mosquitto` |
 | Board and this machine on the same network | The board sends to a fixed address, compiled into the firmware |
 | `MQTT_LOCAL_BROKER_IP` in the firmware = this machine's address | The script prints the address to use when it starts, and with `status`. It comes from DHCP: after changing network, or a new lease, the firmware must be rebuilt |
-| Topic `az3166/telemetry` | The one `vss-publisher` subscribes to |
+| Topic `FEVengers_MQTT/telemetry` | The firmware's topic; `vss-publisher` subscribes to it |
 
 The firmware connects once and does not reconnect: after restarting AutoSD or the broker, reset the board.
 

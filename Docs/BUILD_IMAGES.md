@@ -88,7 +88,7 @@ Differences to those documents:
 | SOVD bridge port | `7690` | Port of the architecture diagram; `7691` is the bridge's own default |
 | Catalog folder on the target | `/var/lib/fevengers/catalogs` | `/var` is the only persistent location in the AutoSD image |
 
-The publisher subscribes to the MQTT topic `az3166/telemetry` on `localhost:1883` (team decision). The board firmware must publish to that same topic; at the time of writing `FEVengersApp/cloud_config.h` still uses `doctorwhodunit/threadx/temperature`.
+The publisher subscribes to the MQTT topic `FEVengers_MQTT/telemetry` on `localhost:1883`. That is the topic the board firmware publishes on (`MQTT_CLIENT_NAME "/telemetry"` with client name `FEVengers_MQTT`, see `Threadx_AZ3166_MQTT_Temp_Source.md`).
 
 ---
 
@@ -164,5 +164,6 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `setup-autosd.sh`, install path | Not run. The install steps are the ones recorded for our QEMU image, where they worked by hand |
 | `deploy-to-autosd.sh --no-persist` (the default at that time) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
 | `deploy-to-autosd.sh --no-build`, persistent (the default now), followed by a restart of the image | Run: all five workloads come back `Running(Ok)` on their own, `/tmp/iceoryx2` is recreated, the SOVD interface answers, no SELinux denials |
-| Data from the board through to the Guardian | Not seen yet: without board data the Guardian is `DEGRADED` (`TempSourceConnectionLost`), as designed |
+| Data from the real board through to the Guardian | Run: readings arrive on `FEVengers_MQTT/telemetry` once per second and the Guardian goes `CLEAR` → `MONITORING` |
+| Guardian reporting its faults to the DFM (the `guardian` workload's IPC options and `--dfm-catalog`) | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |

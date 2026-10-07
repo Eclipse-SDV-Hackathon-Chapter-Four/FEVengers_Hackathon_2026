@@ -17,7 +17,7 @@
 [mqtt]
 host = "localhost"
 port = 1883
-topic = "az3166/telemetry"         # topic the AZ3166 publishes on
+topic = "FEVengers_MQTT/telemetry" # topic the AZ3166 publishes on
 client_id = "vss-uprotocol-publisher"
 keep_alive_s = 10
 
