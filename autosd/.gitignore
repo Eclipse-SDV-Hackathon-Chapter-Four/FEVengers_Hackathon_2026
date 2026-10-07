@@ -1,0 +1,5 @@
+# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
+# AutoSD disk image and its runtime files; everyone brings their own copy.
+*.qcow2
+*.qcow2.xz
+.run/

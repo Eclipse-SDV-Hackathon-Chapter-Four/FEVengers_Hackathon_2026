@@ -69,3 +69,6 @@ Testing/
 
 # Rust
 target/
+
+# Image archives written by deploy/build-images.sh
+/build/images/
