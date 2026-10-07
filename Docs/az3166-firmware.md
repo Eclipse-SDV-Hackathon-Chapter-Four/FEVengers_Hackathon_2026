@@ -133,7 +133,9 @@ A fault mode is active only while the button is held, and ends when it is releas
 | nothing | `MODE: NORMAL` | Sensor reading | +1 per message | Valid stream |
 | A | `MODE: STUCK` | Frozen at the reading when A was pressed | Frozen | Same counter again and again: `TransportDuplicate`, after `stuck_window_ms` `TempSignalStuck` |
 | B | `MODE: DROPOUT` | Nothing is sent | Does not advance | No message: after `stale_timeout_ms` `TempSourceConnectionLost` |
-| A and B | `MODE: OUT OF RNG` | Starts at the sensor reading, +20 °C per message up to 160 °C, then stays there | +1 per message | A fast rise through the warning and critical thresholds, then above `max_c` (150 °C): `TempOutOfRange` |
+| A and B | `MODE: OUT OF RNG` | Starts at the sensor reading, +20 °C per message up to 160 °C, then stays there | +1 per message | Each step is faster than `max_rate_c_per_s` (10 °C/s) and is discarded as `TempSignalSpike`; above `max_c` (150 °C) the readings are discarded as `TempOutOfRange`. No reading accepted for `stale_timeout_ms`: DEGRADED |
+
+All three modes end in DEGRADED: the Guardian discards the injected readings, so the buttons do not drive it to WARNING or CRITICAL.
 
 A and B together take priority over a single button. The Guardian column follows the rules in [`battery-thermal-guardian.md`](battery-thermal-guardian.md), sections State machine and Signal integrity.
 
