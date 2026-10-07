@@ -1,3 +1,7 @@
+# Disclaimer
+Generated with AI assist
+GitHub Copilot
+
 ## Eclipse SDV Hackathon: FEVengers MQTT Demo
 
 This section documents the FEVengers hackathon changes to the original MXChip AZ3166 MQTT sample in this repository. The `mqtt` build configuration remains based on Eclipse ThreadX and NetX Duo; the additions provide local-broker telemetry, an OLED status display, and button-driven fault injection.
@@ -75,7 +79,3 @@ Relevant implementation files:
 - `app/mqtt/main.c` — ThreadX application and telemetry, MQTT, and display thread startup.
 - `app/mqtt/telemetry.c` / `app/mqtt/telemetry.h` — sensor sampling and JSON payload construction.
 - `app/mqtt/mqtt_client.c` / `app/mqtt/mqtt_client.h` — MQTT session, display refresh, button fault behavior, counter, and RGB LED indication.
-
-### AI assistance and attribution
-
-The FEVengers-specific code changes and this documentation were developed with assistance from GitHub Copilot, an AI coding assistant in Visual Studio Code. The project team is responsible for reviewing, validating, and using the resulting code and documentation.
