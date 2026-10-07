@@ -1,0 +1,61 @@
+# Created with AI assistance (Claude Opus 5.5, Anthropic).
+#
+# OpenSOVD gateway with DFM fault support (--dfm-fault-app / --dfm-fault-component)
+#
+# Source: the coaches' reference implementation (by Rama) in
+#   Eclipse-SDV-Hackathon-Chapter-Four/Doctor-Whodunit, branch example-first-steps,
+#   folder demo/opensovd-core
+# Two fixes applied during the build:
+#   1. opensovd-cli/lib and opensovd-cli/build are missing in that branch
+#      (its .gitignore ignores lib/ and build/) -> taken from upstream
+#      eclipse-opensovd/opensovd-core @ 1bf4c47 (Sept 8, the base of the example)
+#   2. opensovd-dfm-adapter pins dfm_lib from the PR fork (bburda42dot @ 2b638d84)
+#      -> repinned to eclipse-opensovd/fault-lib @ 12dac502, the same commit as
+#      our DFM image, so gateway and DFM speak the same iceoryx2 protocol
+
+ARG EXAMPLE_REPO=https://github.com/Eclipse-SDV-Hackathon-Chapter-Four/Doctor-Whodunit.git
+ARG EXAMPLE_REV=5756330aa404b1b9accc67fa7c71c5fef1f22a85
+ARG UPSTREAM_REPO=https://github.com/eclipse-opensovd/opensovd-core.git
+ARG UPSTREAM_REV=1bf4c47c68dde44fb81ee1301619ac3957f08c92
+ARG FAULTLIB_REV=12dac502616701734f90a61edca1326ae2ac6506
+
+# ---- Build stage ----
+FROM docker.io/library/rust:1-bookworm AS build
+ARG EXAMPLE_REPO
+ARG EXAMPLE_REV
+ARG UPSTREAM_REPO
+ARG UPSTREAM_REV
+ARG FAULTLIB_REV
+
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Use the image's stable toolchain instead of the nightly pinned in rust-toolchain.toml
+# (verified to build with stable 1.97).
+ENV RUSTUP_TOOLCHAIN=stable
+
+WORKDIR /src
+# Reference implementation (example branch)
+RUN git clone --quiet ${EXAMPLE_REPO} example \
+ && git -C example checkout --quiet ${EXAMPLE_REV}
+# Upstream opensovd-core for the two missing folders
+RUN git clone --quiet ${UPSTREAM_REPO} upstream \
+ && git -C upstream checkout --quiet ${UPSTREAM_REV}
+
+WORKDIR /src/example/demo/opensovd-core
+# Fix 1: restore missing opensovd-cli/lib and opensovd-cli/build
+RUN cp -r /src/upstream/opensovd-cli/lib /src/upstream/opensovd-cli/build opensovd-cli/
+# Fix 2: same fault-lib commit as the DFM image
+RUN sed -i "s#dfm_lib = { git = \"https://github.com/bburda42dot/fault-lib.git\", rev = \"[0-9a-f]*\" }#dfm_lib = { git = \"https://github.com/eclipse-opensovd/fault-lib.git\", rev = \"${FAULTLIB_REV}\" }#" \
+        opensovd-dfm-adapter/Cargo.toml \
+ && grep -q "eclipse-opensovd/fault-lib.git" opensovd-dfm-adapter/Cargo.toml
+
+RUN cargo build --release -p opensovd-gateway --features fault-lib
+
+# ---- Runtime stage ----
+FROM docker.io/library/debian:bookworm-slim
+COPY --from=build /src/example/demo/opensovd-core/target/release/opensovd-gateway /usr/local/bin/opensovd-gateway
+EXPOSE 7690
+ENV SOVD_URL=http://0.0.0.0:7690/sovd
+ENTRYPOINT ["/usr/local/bin/opensovd-gateway"]
+CMD ["--dfm-fault-app", "battery"]

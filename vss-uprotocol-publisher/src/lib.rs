@@ -27,7 +27,7 @@
 //! # Life of one reading
 //!
 //! 1. `main.rs` connects to the MQTT broker (rumqttc) and to Zenoh
-//!    ([`publisher::zenoh_transport`]), then subscribes to `az3166/telemetry`.
+//!    ([`publisher::zenoh_transport`]), then subscribes to `FEVengers_MQTT/telemetry`.
 //! 2. The board publishes all its sensor values once per second, e.g.
 //!    `{"pressure_hPa": 1215.87, "temperature_degC": 24.65, ..., "counter": 31}`;
 //!    the broker forwards it; the MQTT event loop in `main.rs` receives it.

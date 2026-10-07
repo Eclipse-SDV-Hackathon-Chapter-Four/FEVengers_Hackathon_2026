@@ -1,0 +1,19 @@
+# Created with AI assistance (Claude Opus 5.5, Anthropic).
+#
+# Dummy Battery Thermal Guardian: reports the four Guardian faults to the
+# Eclipse OpenSOVD DFM on command. src/faults.rs is the reusable part.
+
+[package]
+name = "dummy-guardian"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# Same fault-lib commit as the DFM image (PR #7, DFM + SOVD interface).
+fault_lib = { git = "https://github.com/eclipse-opensovd/fault-lib.git", rev = "12dac502616701734f90a61edca1326ae2ac6506" }
+common    = { git = "https://github.com/eclipse-opensovd/fault-lib.git", rev = "12dac502616701734f90a61edca1326ae2ac6506" }
+
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -51,7 +51,7 @@ impl Default for MqttConfig {
         Self {
             host: "localhost".into(),
             port: 1883, // standard unencrypted MQTT port
-            topic: "az3166/telemetry".into(),
+            topic: "FEVengers_MQTT/telemetry".into(),
             client_id: "vss-uprotocol-publisher".into(),
             keep_alive_s: 10,
         }
