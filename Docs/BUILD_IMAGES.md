@@ -164,5 +164,6 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `setup-autosd.sh`, install path | Not run. The install steps are the ones recorded for our QEMU image, where they worked by hand |
 | `deploy-to-autosd.sh --no-persist` (the default at that time) | Run against the QEMU image: all five workloads `Running(Ok)`, DFM loads the `battery` catalog, `http://localhost:7690/sovd/v1/components/battery/faults` answers, no SELinux denials |
 | `deploy-to-autosd.sh --no-build`, persistent (the default now), followed by a restart of the image | Run: all five workloads come back `Running(Ok)` on their own, `/tmp/iceoryx2` is recreated, the SOVD interface answers, no SELinux denials |
-| Data from the board through to the Guardian | Not seen yet: without board data the Guardian is `DEGRADED` (`TempSourceConnectionLost`), as designed |
+| Data from the real board through to the Guardian | Run: readings arrive on `FEVengers_MQTT/telemetry` once per second and the Guardian goes `CLEAR` → `MONITORING` |
+| Guardian reporting its faults to the DFM (the `guardian` workload's IPC options and `--dfm-catalog`) | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |
