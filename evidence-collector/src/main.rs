@@ -7,7 +7,7 @@
 //
 // To be implemented:
 //   - collect Guardian events (see battery-thermal-guardian/src/bin/guardian_monitor.rs)
-//   - read the matching fault records over SOVD REST (GET /sovd/v1/components/battery/faults)
+//   - read the matching fault records over SOVD REST (GET /sovd/v1/apps/battery/faults)
 //   - correlate them by correlation id and write PASS / FAIL / INCONCLUSIVE with evidence links
 
 fn main() {

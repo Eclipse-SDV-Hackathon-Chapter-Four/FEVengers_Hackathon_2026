@@ -12,8 +12,9 @@
 # manifest on the target, so the workloads start by themselves at every boot.
 #
 # Run ./deploy/build-images.sh first. Only the localhost/* images named in the
-# manifest are loaded; workloads that use them are restarted, all others
-# (e.g. the MQTT broker) are left running.
+# manifest are loaded; workloads that use them are restarted, other workloads
+# of the manifest (e.g. the MQTT broker) are left running, and workloads on
+# the target that the manifest does not list are removed.
 #
 # The target is reached over SSH. Default is the QEMU image on this machine
 # (127.0.0.1:2222, no IP needed); for a device on the network set AUTOSD_HOST
@@ -33,10 +34,15 @@ TAG_NAME=deploy
 IMAGES_DIR="${IMAGES_DIR:-$REPO/build/images}"
 MANIFEST="${MANIFEST:-$REPO/deploy/ankaios-manifest.yaml}"
 
-# Fault catalogs on the target (mounted into the dfm workload).
+# Fault catalogs on the target (mounted into the dfm and guardian workloads).
 T_CATALOGS=/var/lib/fevengers/catalogs
+# Fault monitor page, served by the opensovd-gateway workload on /ui/.
+WEBUI_DIR="$REPO/opensovd-gateway-dfm/webui"
+T_WEBUI=/var/lib/fevengers/webui
+# Fault table for the terminal, used on the target as "watch -n 1 /root/faults.sh".
+FAULTS_SCRIPT="$REPO/opensovd-gateway-dfm/faults.sh"
 
-usage() { sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------- manifest
 # Prints "workload image" for every workload of the manifest.
@@ -82,17 +88,44 @@ load_images() {
 
 prepare_vm() {
   local f
-  log "preparing the target ($T_IOX, $T_CATALOGS)"
-  target "mkdir -p $T_IOX $T_CATALOGS"
+  log "preparing the target ($T_IOX, $T_CATALOGS, $T_WEBUI)"
+  target "mkdir -p $T_IOX $T_CATALOGS $T_WEBUI"
   for f in "$REPO"/catalogs/*.json; do
     [ -f "$f" ] || fail "no fault catalog in catalogs/"
     target "cat > $T_CATALOGS/$(basename "$f")" <"$f"
   done
+  for f in "$WEBUI_DIR"/*; do
+    [ -f "$f" ] || fail "no web UI files in ${WEBUI_DIR#"$REPO"/}/"
+    target "cat > $T_WEBUI/$(basename "$f")" <"$f"
+  done
+  if [ -f "$FAULTS_SCRIPT" ]; then
+    target "cat > /root/faults.sh && chmod +x /root/faults.sh" <"$FAULTS_SCRIPT"
+  fi
+}
+
+# Workloads running on the target that the manifest no longer lists (e.g. a
+# service that was replaced). "ank apply" would leave them running.
+stale_workloads() {
+  local name wanted
+  wanted=" $(manifest_images | awk '{print $1}' | tr '\n' ' ')"
+  for name in $(target "$ANK get workloads" | awk 'NR > 1 {print $1}'); do
+    case "$wanted" in
+      *" $name "*) ;;
+      *) echo "$name" ;;
+    esac
+  done
 }
 
 apply_manifest() {
-  local workloads
+  local workloads stale
   workloads="$(own_workloads | tr '\n' ' ')"
+  stale="$(stale_workloads | tr '\n' ' ')"
+  # The manifest is the whole desired state: what it does not list is removed.
+  if [ -n "$stale" ]; then
+    log "removing workloads that are not in the manifest: $stale"
+    # shellcheck disable=SC2086
+    target "$ANK delete workload $stale" >/dev/null 2>&1 || true
+  fi
   # Ankaios leaves an unchanged workload alone, so a new image would not be
   # picked up: delete our workloads first, then apply the whole manifest.
   log "restarting workloads: $workloads"
@@ -157,7 +190,8 @@ prepare_vm
 apply_manifest
 [ "$PERSIST" -eq 0 ] || persist
 wait_running
-log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/components/battery/faults"
+log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/apps/battery/faults"
+log "          fault monitor: http://$AUTOSD_HOST:7690/ui/"
 if [ "$PERSIST" -eq 1 ]; then
   log "persistent: the workloads start by themselves at every boot"
 else

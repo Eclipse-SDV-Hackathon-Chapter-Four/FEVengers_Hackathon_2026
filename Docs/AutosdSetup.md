@@ -1,8 +1,8 @@
-# AutoSD image folder
+# AutoSD image: setup and start
 
 > Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: `claude-opus-5-5`, Anthropic).
 
-Put your copy of the Eclipse AutoSD QEMU image into this folder and start it with `autosd.sh`. The image is not in git (3.6 GB); everyone brings their own. The script only starts the image, it does not download or copy one.
+Put your copy of the Eclipse AutoSD QEMU image into the `autosd/` folder of the repository and start it with `autosd/autosd.sh`. The image is not in git (3.6 GB); everyone brings their own. The script only starts the image, it does not download or copy one.
 
 ## What you need
 
@@ -93,7 +93,7 @@ Restarting AutoSD restarts the MQTT broker, so the board must be reset afterward
 |---|---|---|
 | 2222 (this machine only) | 22 | SSH; `deploy/` scripts connect here |
 | 1883 | 1883 | MQTT broker: the AZ3166 board publishes here |
-| 7690 | 7690 | SOVD REST: `http://localhost:7690/sovd/v1/components/battery/faults` |
+| 7690 | 7690 | OpenSOVD gateway: faults on `http://localhost:7690/sovd/v1/apps/battery/faults`, fault monitor page on `http://localhost:7690/ui/` |
 
 ## MQTT data from the board
 
@@ -120,7 +120,7 @@ The firmware connects once and does not reconnect: after restarting AutoSD or th
 
 After that the five workloads start by themselves every time the image boots. When only the configuration changed and the images are already in AutoSD, `./deploy/deploy-to-autosd.sh --no-build` skips loading them again.
 
-Details: [Docs/BUILD_IMAGES.md](../Docs/BUILD_IMAGES.md).
+Details: [BUILD_IMAGES.md](BUILD_IMAGES.md).
 
 ## Status
 
