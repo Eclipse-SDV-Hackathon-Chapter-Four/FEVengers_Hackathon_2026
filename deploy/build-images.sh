@@ -3,8 +3,9 @@
 #
 # build-images.sh - build the container images of every service that runs on AutoSD.
 #
-#   ./deploy/build-images.sh               build all services listed below
+#   ./deploy/build-images.sh               build the services that get deployed
 #   ./deploy/build-images.sh guardian dfm  build only these (name or unique part of it)
+#   ./deploy/build-images.sh --all         also build the services marked "optional"
 #   ./deploy/build-images.sh --list        show the services and their image names
 #   ./deploy/build-images.sh --no-save     build, but do not write the image archives
 #
@@ -24,13 +25,14 @@ set -euo pipefail
 # ---------------------------------------------------------------- services
 # One line per service: <image name>|<build context, relative to the repo root>
 # The context must contain a Containerfile. To add a service, add a line.
+# A third field "optional" marks a service that is not deployed yet: it is
+# built only when it is named on the command line, or with --all.
 SERVICES="
 vss-uprotocol-publisher|vss-uprotocol-publisher
 battery-thermal-guardian|battery-thermal-guardian
 dfm|dfm-container
-sovd-fault-bridge|sovd/sovd-fault-bridge
 opensovd-gateway-dfm|opensovd-gateway-dfm
-fault-campaign-runner|fault-campaign-runner
+fault-campaign-runner|fault-campaign-runner|optional
 evidence-collector|evidence-collector
 "
 # The MQTT broker is not built: it is the stock docker.io/library/eclipse-mosquitto:2.
@@ -47,10 +49,15 @@ log()  { printf '\033[1;34m[build]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[build]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[build]\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '4,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-# Prints every "name|context" line of the table (blank and # lines skipped).
+# Prints every "name|context[|optional]" line of the table (blank and # lines skipped).
 services() { printf '%s\n' "$SERVICES" | grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*#'; }
+
+# The same as "name|context" lines; without an argument the optional ones are left out.
+selectable() {   # selectable [all]
+  services | awk -F'|' -v all="${1:-}" 'all == "all" || $3 != "optional" {print $1 "|" $2}'
+}
 
 image_of() { echo "localhost/$1:$TAG"; }
 
@@ -64,7 +71,7 @@ resolve() {
       *"$want"*) partial="$name|$ctx"; hits=$((hits + 1)) ;;
     esac
   done <<EOF
-$(services)
+$(selectable all)
 EOF
   if [ -n "$exact" ]; then echo "$exact"; return 0; fi
   [ "$hits" -eq 1 ] && { echo "$partial"; return 0; }
@@ -113,15 +120,17 @@ EOF
 
 # ---------------------------------------------------------------- arguments
 SAVE=1
+ALL=""
 WANTED=""
 for arg in "$@"; do
   case "$arg" in
     --list)
-      printf '%-28s %-44s %s\n' SERVICE IMAGE CONTEXT
-      services | while IFS='|' read -r name ctx; do
-        printf '%-28s %-44s %s\n' "$name" "$(image_of "$name")" "$ctx/"
+      printf '%-28s %-44s %-28s %s\n' SERVICE IMAGE CONTEXT ""
+      services | while IFS='|' read -r name ctx opt; do
+        printf '%-28s %-44s %-28s %s\n' "$name" "$(image_of "$name")" "$ctx/" "${opt:+optional: only by name or with --all}"
       done
       exit 0 ;;
+    --all)     ALL=all ;;
     --no-save) SAVE=0 ;;
     -h|--help) usage; exit 0 ;;
     -*) fail "unknown option: $arg (try --help)" ;;
@@ -130,7 +139,7 @@ for arg in "$@"; do
 done
 
 if [ -z "$WANTED" ]; then
-  SELECTED="$(services)"
+  SELECTED="$(selectable $ALL)"
 else
   SELECTED=""
   for arg in $WANTED; do

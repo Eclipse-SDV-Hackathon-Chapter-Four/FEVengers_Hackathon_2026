@@ -8,8 +8,8 @@
 # Usage:  ./fault_host.sh            once
 #         watch -n 1 ./fault_host.sh live view
 # OpenSOVD gateway (default): ./fault_host.sh
-# Old SOVD fault bridge:      URL=http://127.0.0.1:7691/sovd/v1/components/battery/faults ./fault_host.sh
-# Reads snake_case (bridge) and camelCase (gateway) status keys.
+# Another fault list:         URL=<fault-list-url> ./fault_host.sh
+# Reads camelCase status keys (gateway) and snake_case ones (the former SOVD fault bridge).
 
 URL=${URL:-http://127.0.0.1:7690/sovd/v1/apps/battery/faults}
 

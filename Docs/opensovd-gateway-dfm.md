@@ -2,6 +2,8 @@
 
 > Created with AI assistance (Claude Opus 5.5, Anthropic).
 
+> **Note.** The dummy Guardian used in sections 4.5 and 6 was a test tool from before the real Guardian reported to the DFM. Its code was removed from the repository on 7 October 2026, so those commands no longer work. The code is in the git history up to commit `0fda212` (`git show 0fda212:<path>`). To trigger faults now: the buttons of the AZ3166 board, or a test MQTT message (see [`BUILD_IMAGES.md`](BUILD_IMAGES.md)). The standalone SOVD fault bridge this gateway replaced was removed at the same time.
+
 Runs the complete Guardian fault chain with the **official OpenSOVD gateway** serving faults from the Eclipse OpenSOVD **DFM** on the standard SOVD path, plus a browser fault monitor:
 
 ```
@@ -115,7 +117,7 @@ cd $REPO/opensovd-gateway-dfm
 podman build -t localhost/opensovd-gateway-dfm:dev .
 ```
 
-First build: about 10 minutes (stable Rust toolchain).
+First build: about 7 to 10 minutes (Rust 1.99.0, the compiler of the build image).
 
 ---
 

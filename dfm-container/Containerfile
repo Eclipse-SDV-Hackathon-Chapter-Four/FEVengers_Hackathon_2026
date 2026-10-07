@@ -1,11 +1,22 @@
+# fault-lib commit to build. The Guardian and the OpenSOVD gateway pin the same
+# one in their Cargo manifests: all of them must agree on the iceoryx2 message
+# format and on the catalog hash.
+ARG FAULTLIB_REV=12dac502616701734f90a61edca1326ae2ac6506
+
 # ---- Build stage ----
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
+ARG FAULTLIB_REV
 RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-dev git \
     && rm -rf /var/lib/apt/lists/*
+# fault-lib's rust-toolchain.toml asks for a nightly; it uses no nightly-only
+# feature, so build it with the compiler of this image like every other service.
+ENV RUSTUP_TOOLCHAIN=1.99.0
 WORKDIR /src
-RUN git clone --depth 1 https://github.com/eclipse-opensovd/fault-lib.git .
-RUN cargo build --release -p dfm_bin \
- && cargo build --release -p fault_lib --features testutils --example tst_app
+RUN git init --quiet . \
+ && git fetch --quiet --depth 1 https://github.com/eclipse-opensovd/fault-lib.git ${FAULTLIB_REV} \
+ && git checkout --quiet FETCH_HEAD
+RUN cargo build --release --locked -p dfm_bin \
+ && cargo build --release --locked -p fault_lib --features testutils --example tst_app
 
 # ---- Runtime stage ----
 FROM docker.io/library/debian:bookworm-slim
