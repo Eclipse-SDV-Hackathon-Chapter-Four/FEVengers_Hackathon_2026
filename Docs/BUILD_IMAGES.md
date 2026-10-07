@@ -142,7 +142,21 @@ Connection settings, shared by `setup-autosd.sh` and `deploy-to-autosd.sh`:
 ./deploy/deploy-to-autosd.sh --no-build    # same, without loading the images again (they are already on the target)
 ./deploy/deploy-to-autosd.sh --no-persist  # start the workloads for this boot only
 ./deploy/deploy-to-autosd.sh status        # show the Ankaios workloads
+./deploy/deploy-to-autosd.sh check         # compare the target with the manifest; changes nothing
+./deploy/deploy-to-autosd.sh sync          # remove what the manifest does not use, add what is missing
+./deploy/deploy-to-autosd.sh clear-faults  # empty the DFM's fault memory (start of a test run)
+./deploy/deploy-to-autosd.sh reset         # show what a reset would remove
+./deploy/deploy-to-autosd.sh reset --yes   # remove our workloads, images and files from the target
 ```
+
+Maintenance commands, all run on the laptop:
+
+| Command | What it does |
+|---|---|
+| `check` | For every workload of the manifest: is it `Running(Ok)`, is its image stored on the target. Also reports workloads that run on the target but are not in the manifest, our images that nothing uses, and a startup manifest that differs from the manifest. Exits non-zero on a difference |
+| `sync` | Makes the target match the manifest with as little change as possible: deletes workloads that are not in the manifest, loads our images that are missing, starts workloads that are missing or not running, removes our images that nothing uses, refreshes the catalog and web page, and rewrites the startup manifest if it differs. Running workloads are not restarted and stored images are not loaded again, so it does not pick up a rebuilt image: use the plain deploy for that |
+| `clear-faults` | `DELETE` on `/sovd/v1/apps/<app>/faults` through the OpenSOVD gateway, then prints the fault table. The app id is the `--dfm-fault-app` of the manifest |
+| `reset` | Removes the workloads that run our images, all `localhost/*` images, the named volumes of the manifest, `/var/lib/fevengers` and `/root/faults.sh`, and reduces the startup manifest to the workloads of other images (the MQTT broker). Ankaios and `build/images/` on the laptop stay. Needs `--yes`; without it nothing is changed |
 
 What it does, in order:
 
@@ -184,5 +198,9 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `opensovd-gateway` workload on AutoSD (replacing the bridge) | Run: attaches to the DFM (`app_id=battery`), `/sovd/v1/apps/battery/faults` lists the four faults, the fault monitor page answers on `http://localhost:7690/ui/`, `/root/faults.sh` prints the table, no SELinux denials |
 | Deploy removing a workload that left the manifest | Run: `sovd-bridge` was removed, also from the startup manifest |
 | Fault memory across a DFM restart | Not kept: the occurrence counters are back at 0 after a redeploy. The `dfm-store` volume is mounted but the DFM writes nothing into it |
+| `check` | Run: reports a healthy target as matching; with a changed manifest it reports the missing workload, the extra workload, the unused images and the different startup manifest |
+| `clear-faults` | Run: counters 15 / 9 / 2 back to 0, table printed |
+| `reset --yes` | Run: four workloads, their images, the `dfm-store` volume and `/var/lib/fevengers` removed; the broker kept running and the board stayed connected |
+| `sync` | Run three ways: on a healthy target (removes only the unused bridge image), again (nothing to do), and after a reset (loads four images, starts four workloads, restores files and startup manifest) |
 | Restart of the image with the gateway in the startup manifest | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |
