@@ -51,6 +51,8 @@ T_CATALOGS=$T_DATA/catalogs
 # Fault monitor page, served by the opensovd-gateway workload on /ui/.
 WEBUI_DIR="$REPO/opensovd-gateway-dfm/webui"
 T_WEBUI=$T_DATA/webui
+# Evidence runs written by the evidence-collector workload (one folder per run).
+T_EVIDENCE=$T_DATA/evidence
 # Fault table for the terminal, used on the target as "watch -n 1 /root/faults.sh".
 FAULTS_SCRIPT="$REPO/opensovd-gateway-dfm/faults.sh"
 
@@ -126,8 +128,8 @@ load_images() {
 
 prepare_vm() {
   local f
-  log "preparing the target ($T_IOX, $T_CATALOGS, $T_WEBUI)"
-  target "mkdir -p $T_IOX $T_CATALOGS $T_WEBUI"
+  log "preparing the target ($T_IOX and $T_DATA/{catalogs,webui,evidence})"
+  target "mkdir -p $T_IOX $T_CATALOGS $T_WEBUI $T_EVIDENCE"
   for f in "$REPO"/catalogs/*.json; do
     [ -f "$f" ] || fail "no fault catalog in catalogs/"
     target "cat > $T_CATALOGS/$(basename "$f")" <"$f"
@@ -433,7 +435,7 @@ cmd_reset() {
   log "  workloads:${workloads:- none}"
   log "  images:    ${images:-none}"
   log "  volumes:   ${volumes:-none}"
-  log "  files:     $T_DATA  /root/faults.sh"
+  log "  files:     $T_DATA (including the recorded evidence runs)  /root/faults.sh"
   log "  startup manifest: reduced to$keep"
   log "kept: Ankaios, the workloads listed above as kept, and build/images/ on this machine"
   if [ "$confirmed" != yes ]; then
@@ -497,6 +499,7 @@ apply_manifest
 wait_running
 log "deployed. SOVD faults: http://$AUTOSD_HOST:7690/sovd/v1/apps/battery/faults"
 log "          fault monitor: http://$AUTOSD_HOST:7690/ui/"
+log "          evidence runs: http://$AUTOSD_HOST:7700/"
 if [ "$PERSIST" -eq 1 ]; then
   log "persistent: the workloads start by themselves at every boot"
 else

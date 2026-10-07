@@ -94,6 +94,7 @@ Restarting AutoSD restarts the MQTT broker, so the board must be reset afterward
 | 2222 (this machine only) | 22 | SSH; `deploy/` scripts connect here |
 | 1883 | 1883 | MQTT broker: the AZ3166 board publishes here |
 | 7690 | 7690 | OpenSOVD gateway: faults on `http://localhost:7690/sovd/v1/apps/battery/faults`, fault monitor page on `http://localhost:7690/ui/` |
+| 7700 | 7700 | Evidence collector: start and stop an evidence run on `http://localhost:7700/` |
 
 ## MQTT data from the board
 

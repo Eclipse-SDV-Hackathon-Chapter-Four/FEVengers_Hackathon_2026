@@ -75,13 +75,13 @@ Only **RAISED** rows get a verdict: **✔ confirmed** (the collector sees the vi
 min_c = -40.0
 max_c = 150.0
 max_rate_c_per_s = 10.0
-stuck_window_ms = 30000
+stuck_window_ms = 3000
 stale_timeout_ms = 3000
 ```
 
 - Values = defaults of `battery-thermal-guardian/config/guardian.toml` `[signal]`.
 - Baked into the image at `/etc/evidence-collector/limits.toml`; missing file → same built-in defaults.
-- **Keep in sync with the Guardian.** If the Guardian runs with `demo.toml` (5 s stuck window), use the same values here, or the collector judges against the wrong limit.
+- **Keep in sync with the Guardian.** If the Guardian's `[signal]` values change or it runs with another config, use the same values here, or the collector judges against the wrong limit. (The stuck window was 30000 here while the Guardian had moved to 3000; with that, every stuck fault the Guardian raised would have been marked "not seen".)
 - Change without rebuild: `-v /root/limits.toml:/etc/evidence-collector/limits.toml:ro`.
 - Loaded values are printed at startup: log line `expected limits {...}`.
 

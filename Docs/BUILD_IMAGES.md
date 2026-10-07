@@ -43,9 +43,9 @@ All services are compiled inside containers, so the host needs no Rust toolchain
 | DFM | `localhost/dfm:dev` | `dfm-container/` |
 | OpenSOVD gateway | `localhost/opensovd-gateway-dfm:dev` | `opensovd-gateway-dfm/` |
 | Fault campaign runner (skeleton, optional) | `localhost/fault-campaign-runner:dev` | `fault-campaign-runner/` |
-| Evidence collector (skeleton, optional) | `localhost/evidence-collector:dev` | `evidence-collector/` |
+| Evidence collector | `localhost/evidence-collector:dev` | `evidence-collector/` |
 
-The two skeletons are empty Rust programs: they build and print `not implemented yet`, nothing more; `src/main.rs` in each lists what is to be implemented. They are marked `optional` in the table: built only when named (`./deploy/build-images.sh evidence`) or with `--all`, because they are not deployed yet. The SOVD fault bridge and the dummy Guardian, which were used before the OpenSOVD gateway and the real Guardian's DFM reporting existed, are no longer in the repository.
+The fault campaign runner is still an empty Rust program: it builds and prints `not implemented yet`; `src/main.rs` lists what is to be implemented. It is marked `optional` in the table: built only when named (`./deploy/build-images.sh campaign`) or with `--all`, because it is not deployed. The evidence collector is implemented (see [`evidence-collector.md`](evidence-collector.md)); it is built and deployed like the other services. The SOVD fault bridge and the dummy Guardian, which were used before the OpenSOVD gateway and the real Guardian's DFM reporting existed, are no longer in the repository.
 
 The MQTT broker is not built; it is the stock `docker.io/library/eclipse-mosquitto:2`.
 
@@ -99,7 +99,7 @@ Then add a workload for it to `deploy/ankaios-manifest.yaml`.
 
 ## 4. Ankaios manifest
 
-`deploy/ankaios-manifest.yaml` describes the five workloads of the architecture:
+`deploy/ankaios-manifest.yaml` describes the six workloads of the architecture:
 
 | Workload | Image | Role |
 |---|---|---|
@@ -108,15 +108,18 @@ Then add a workload for it to `deploy/ankaios-manifest.yaml`.
 | `guardian` | `battery-thermal-guardian` | Thermal monitoring; reports its faults to the DFM |
 | `dfm` | `dfm` | Stores the faults |
 | `opensovd-gateway` | `opensovd-gateway-dfm` | SOVD REST on port 7690 (`/sovd/v1/apps/battery/faults`) and the fault monitor page (`/ui/`) |
+| `evidence-collector` | `evidence-collector` | Observes the Guardian's events and the raw samples over uProtocol, checks each fault against its own limits, writes one folder per evidence run; web UI and REST on port 7700 |
 
-The Podman options come from `battery-thermal-guardian.md`, `FAULT_CHAIN.md` and `opensovd-gateway-dfm.md`.
+The Podman options come from `battery-thermal-guardian.md`, `FAULT_CHAIN.md`, `opensovd-gateway-dfm.md` and `evidence-collector.md`.
+
+The evidence collector runs without a Zenoh configuration file, like the Guardian and the publisher: on the Eclipse AutoSD image IPv6 is enabled and Zenoh's multicast scouting works between the host-network containers. `evidence-collector.md` asks for `--zenoh-config` on AutoSD; that applies to an image with IPv6 disabled. Its evidence folder is `/var/lib/fevengers/evidence` on the target, not `/root/evidence`.
 
 `PODMAN_MIGRATION.md` and `opensovd-gateway-dfm.md` describe the same containers started by hand (`scp`, `podman run`). The scripts here do that automatically; use one way or the other on a given AutoSD system, not both, or two containers end up on port 7690. Differences:
 
 | Item | By hand (those documents) | Scripts here | Why |
 |---|---|---|---|
 | Catalog and web page on the target | `/root/catalogs`, `/root/webui` | `/var/lib/fevengers/catalogs`, `/var/lib/fevengers/webui` | One folder for everything the deployment puts on the target |
-| Reaching port 7690 from the laptop | SSH tunnel | `autosd/autosd.sh` forwards 7690 | No tunnel needed: `http://localhost:7690/ui/` |
+| Reaching ports 7690 and 7700 from the laptop | SSH tunnel | `autosd/autosd.sh` forwards both | No tunnel needed: `http://127.0.0.1:7690/ui/`, `http://127.0.0.1:7700/` |
 | Who starts the containers | `podman run`, `--restart=always` | Ankaios workloads | Come back after a reboot, one manifest |
 | Fault reporter | `dummy-guardian` (removed from the repository) | The real Guardian | Faults come from real data: the board's buttons, or a test MQTT message |
 
@@ -183,7 +186,7 @@ What it does, in order:
 | Step | Detail |
 |---|---|
 | Load images | Only the `localhost/*` images whose archive in `build/images/` holds another build than the target has stored. The image id is read from the archive with `tar` and compared with the id on the target, so nothing is transferred when nothing changed |
-| Prepare the target | Creates `/tmp/iceoryx2`, copies `catalogs/*.json` to `/var/lib/fevengers/catalogs`, the fault monitor page (`opensovd-gateway-dfm/webui/`) to `/var/lib/fevengers/webui` and the fault table script to `/root/faults.sh` |
+| Prepare the target | Creates `/tmp/iceoryx2` and, under `/var/lib/fevengers`, `catalogs` (copy of `catalogs/*.json`), `webui` (copy of `opensovd-gateway-dfm/webui/`) and `evidence` (written by the evidence collector); copies the fault table script to `/root/faults.sh` |
 | Remove what left the manifest | Workloads running on the target that the manifest no longer lists are deleted (as happened to the former SOVD fault bridge when the gateway replaced it) |
 | Restart workloads | Only the workloads of the images that were loaded, plus any of ours that exist but do not run. If one of them is a workload others depend on (the DFM), all of ours restart and stale iceoryx2 files are cleared, because the others hold connections to the old instance. Then the manifest is applied, which starts what is missing. `--restart` restarts all of ours regardless |
 | Wait | Up to 60 s until every workload is `Running(Ok)`; fails otherwise |
@@ -231,5 +234,10 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | All services on Rust 1.99.0, DFM at fault-lib `12dac502` | Run: all four images build, with no nightly and no toolchain download in the build output. The DFM, built with a nightly before, compiles with 1.99.0 and its `Cargo.lock` unchanged |
 | Unit tests with Rust 1.99.0 (`cargo test --locked` in a throwaway container) | Run: Guardian 35 of 35 passed, publisher 8 of 8 passed |
 | DFM built with another compiler than before, against the unchanged Guardian and gateway | Run on AutoSD: the Guardian connects to the DFM, the gateway attaches, and an injected 500 °C reading shows up as `btg.temp.out_of_range` (`testFailed` true, count 1) and heals after five valid readings |
+| Evidence collector: build with Rust 1.99.0, sixth workload on AutoSD | Run: builds (about 4 minutes), deploy loads and starts only it (5 s), six workloads `Running(Ok)`, no SELinux denials |
+| Evidence collector without a Zenoh configuration file | Run: live tiles show the board's temperature, counter and the Guardian state, so it receives both streams over multicast scouting |
+| Evidence run over port 7700 from the laptop (`/api/start`, injected 500 °C reading, `/api/stop`) | Run: four fault rows, the out-of-range fault "Confirmed: yes", SOVD snapshot before and after differ by one occurrence; `report.md`, `faults.json`, `summary.json`, `events.jsonl` written to `/var/lib/fevengers/evidence/<run-id>/` |
+| Evidence collector: stuck, spike and connection-lost rows; the 3 s stuck limit against a real stuck fault | Not run |
+| Port 7700 forward | Added to the running AutoSD through the QEMU monitor; `autosd.sh` sets it at the next start (not restarted since) |
 | Restart of the image with the gateway in the startup manifest | Not run yet |
 | `ankaios-manifest.yaml` | Applied by the deploy above |

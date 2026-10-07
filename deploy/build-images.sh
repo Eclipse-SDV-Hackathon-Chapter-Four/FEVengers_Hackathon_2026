@@ -33,7 +33,7 @@ battery-thermal-guardian|battery-thermal-guardian
 dfm|dfm-container
 opensovd-gateway-dfm|opensovd-gateway-dfm
 fault-campaign-runner|fault-campaign-runner|optional
-evidence-collector|evidence-collector|optional
+evidence-collector|evidence-collector
 "
 # The MQTT broker is not built: it is the stock docker.io/library/eclipse-mosquitto:2.
 # -------------------------------------------------------------------------

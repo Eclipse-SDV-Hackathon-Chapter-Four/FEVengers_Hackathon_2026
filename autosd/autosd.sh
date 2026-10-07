@@ -27,7 +27,8 @@
 # Tunables (environment):
 #   CPUS=4  MEM=4G
 #   AUTOSD_PORT=2222           host port for SSH (the deploy scripts use the same variable)
-#   FORWARDS="1883:1883 7690:7690"   host:guest TCP forwards (MQTT broker, SOVD REST)
+#   FORWARDS="1883:1883 7690:7690 7700:7700"   host:guest TCP forwards
+#                              (MQTT broker, SOVD REST, evidence collector)
 #   IMAGE=<path>               image file, if it is not in this folder
 set -euo pipefail
 
@@ -48,10 +49,11 @@ OVMF_VARS="$RUN_DIR/ovmf_vars.fd"
 CPUS="${CPUS:-4}"
 MEM="${MEM:-4G}"
 MQTT_PORT=1883
-# MQTT broker 1883 (from the board) and SOVD REST 7690 (to the tester).
-FORWARDS="${FORWARDS:-$MQTT_PORT:$MQTT_PORT 7690:7690}"
+# MQTT broker 1883 (from the board), SOVD REST 7690 and the evidence
+# collector's web UI 7700 (both to the tester).
+FORWARDS="${FORWARDS:-$MQTT_PORT:$MQTT_PORT 7690:7690 7700:7700}"
 
-usage() { sed -n '4,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 is_running() { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 

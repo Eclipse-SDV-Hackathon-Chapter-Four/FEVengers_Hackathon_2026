@@ -98,7 +98,7 @@ struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         // Defaults of battery-thermal-guardian/config/guardian.toml [signal]
-        Limits { min_c: -40.0, max_c: 150.0, max_rate_c_per_s: 10.0, stuck_window_ms: 30000, stale_timeout_ms: 3000 }
+        Limits { min_c: -40.0, max_c: 150.0, max_rate_c_per_s: 10.0, stuck_window_ms: 3000, stale_timeout_ms: 3000 }
     }
 }
 
