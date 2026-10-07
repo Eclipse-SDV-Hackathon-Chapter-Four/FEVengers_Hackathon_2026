@@ -193,7 +193,7 @@ host (`./deploy/install-build-deps.sh`).
 | [`dfm-container`](dfm-container/) | Rust | OpenSOVD `fault-lib` (`dfm_bin`), built from source | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
 | [`opensovd-gateway-dfm`](opensovd-gateway-dfm/) | Rust | OpenSOVD `opensovd-core` (commit `1bf4c47`) with `fault-lib` (`12dac50`), built from source | `rust:1.99.0-bookworm` → `debian:bookworm-slim` |
 | mqtt-broker | – | Eclipse Mosquitto 2 | `eclipse-mosquitto:2` |
-| [`az3166-firmware`](az3166-firmware/) | C | Eclipse ThreadX and NetX Duo (git submodules), the MXChip AZ3166 folder of `eclipse-threadx/samplex` with our application `FEVengersApp` | – (flashed to the board) |
+| [`az3166-firmware`](az3166-firmware/) | C | A patch against [`eclipse-threadx/samplex`](https://github.com/eclipse-threadx/samplex) (commit `c1adc67`): our application `FEVengersApp` on Eclipse ThreadX and NetX Duo. Built with the Arm GNU Toolchain, CMake and Ninja | – (flashed to the board) |
 
 The Rust services share one contract: the payloads in
 [`battery-thermal-guardian/src/contract.rs`](battery-thermal-guardian/src/contract.rs)
@@ -267,7 +267,7 @@ Tests of the Rust services need no broker, network or DFM:
 
 | Path | Content | Docs |
 |---|---|---|
-| [`az3166-firmware/`](az3166-firmware/) | Firmware of the AZ3166 board (`app/FEVengersApp`); ThreadX and NetX Duo as submodules | [AZ3166 firmware](Docs/az3166-firmware.md) |
+| [`az3166-firmware/`](az3166-firmware/) | Firmware of the AZ3166 board: our changes (`app/FEVengersApp`, two driver fixes) as a patch against `eclipse-threadx/samplex` | [AZ3166 firmware](Docs/az3166-firmware.md) |
 | [`vss-uprotocol-publisher/`](vss-uprotocol-publisher/) | MQTT → VSS → uProtocol publisher; test tool `vss-listen` | [Publisher](Docs/vss-uprotocol-publisher.md) |
 | [`battery-thermal-guardian/`](battery-thermal-guardian/) | The Guardian; test tool `guardian-monitor` | [Guardian](Docs/battery-thermal-guardian.md) |
 | [`evidence-collector/`](evidence-collector/) | Evidence collector with web UI | [Evidence collector](Docs/evidence-collector.md) |

@@ -4,7 +4,7 @@
 
 The firmware that runs on the MXChip AZ3166 board: the temperature source of the whole chain. It reads the onboard temperature sensor, publishes it over MQTT once per second, and injects faults while a button is held.
 
-Code: [`az3166-firmware/`](../az3166-firmware/), the application itself in [`az3166-firmware/app/FEVengersApp/`](../az3166-firmware/app/FEVengersApp/)
+Code: a patch against [eclipse-threadx/samplex](https://github.com/eclipse-threadx/samplex), [`az3166-firmware/fevengersapp-vs-samplex.patch`](../az3166-firmware/fevengersapp-vs-samplex.patch). The upstream code is not copied into this repository; [`az3166-firmware/README.md`](../az3166-firmware/README.md) lists what the patch changes.
 
 This is the firmware the board is flashed with. [`Threadx_AZ3166_MQTT_Temp_Source.md`](Threadx_AZ3166_MQTT_Temp_Source.md) describes another variant that is not on the board; see [section 8](#8-not-the-variant-of-threadx_az3166_mqtt_temp_sourcemd).
 
@@ -32,7 +32,7 @@ The [VSS uProtocol Publisher](vss-uprotocol-publisher.md) reads exactly these tw
 |---|---|
 | Board | MXChip AZ3166, connected over USB |
 | Wi-Fi | A 2.4 GHz network; the board does not support 5 GHz. The machine that runs AutoSD must be on the same network |
-| CMake, Ninja | `sudo apt install cmake ninja-build` |
+| Git, CMake, Ninja | `sudo apt install git cmake ninja-build` |
 | Arm GNU Toolchain | 13.3.rel1 (`arm-none-eabi-gcc`), not in the Ubuntu packages in this version |
 
 Toolchain, unpacked to `/opt`:
@@ -48,48 +48,48 @@ These tools are not installed by `deploy/install-host-deps.sh` or `deploy/setup-
 
 ## 3. Get the source
 
-ThreadX and NetX Duo are git submodules of this repository (about 270 MB). They are needed only to build the firmware:
+The firmware is built in a clone of samplex with our patch applied. Clone it outside this repository, for example next to it; `<repo>` is the path of this repository.
 
 ```bash
-git submodule update --init
+git clone https://github.com/eclipse-threadx/samplex.git
+cd samplex
+git checkout c1adc67
+git submodule update --init MXChip/AZ3166/deps/lib/threadx MXChip/AZ3166/deps/lib/netxduo
+git apply <repo>/az3166-firmware/fevengersapp-vs-samplex.patch
 ```
 
-| Submodule | Commit |
+| | |
 |---|---|
-| `az3166-firmware/deps/lib/threadx` | `af3c1e72` |
-| `az3166-firmware/deps/lib/netxduo` | `6c8e9d1c` |
+| `c1adc67` | The commit of samplex `main` the patch was made against. On a newer commit the patch may not apply |
+| Submodules | Only the two the AZ3166 build needs: ThreadX at `af3c1e72`, NetX Duo at `6c8e9d1c`, as samplex pins them |
+| After `git apply` | `git status` shows the new folder `MXChip/AZ3166/app/FEVengersApp/` and three modified files |
+
+Sections 4 to 6 are run in `samplex/MXChip/AZ3166/`.
 
 ## 4. Configure
 
-Edit [`az3166-firmware/app/FEVengersApp/cloud_config.h`](../az3166-firmware/app/FEVengersApp/cloud_config.h):
+Edit `app/FEVengersApp/cloud_config.h`:
 
 | Setting | Value |
 |---|---|
-| `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi network. Empty in the repository: without them the board does not connect |
+| `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi network. Empty in the patch: without them the board does not connect |
 | `WIFI_MODE` | `WPA2_PSK_AES` unless the network differs |
 | `MQTT_LOCAL_BROKER_IP` | Address of the machine that runs AutoSD, written as `IP_ADDRESS(192, 168, 88, 248)`. `./autosd/autosd.sh status` prints the address to use |
 | `MQTT_TELEMETRY_TOPIC` | `FEVengers_MQTT/telemetry`; leave it, the publisher subscribes to this topic |
 
 The address is compiled into the firmware. It comes from DHCP: after a change of network, or a new lease for the AutoSD machine, set it again, rebuild and flash.
 
-Do not commit the Wi-Fi password. To keep git from offering the file for commit after you filled it in:
-
-```bash
-git update-index --skip-worktree az3166-firmware/app/FEVengersApp/cloud_config.h
-```
-
-(`--no-skip-worktree` undoes it.)
+The Wi-Fi password stays in your samplex clone. It must not get into the patch: see the end of section 9.
 
 ## 5. Build
 
 ```bash
-cd az3166-firmware
 ./scripts/build.sh FEVengersApp clean
 ```
 
 | | |
 |---|---|
-| Result | `az3166-firmware/build/app/mxchip_threadx.bin` |
+| Result | `build/app/mxchip_threadx.bin` |
 | `clean` | Needed the first time, and whenever `build/` holds another configuration (`starter`, `mqtt`, ...): without it the old one is rebuilt. Later builds: `./scripts/build.sh FEVengersApp` |
 | Duration | About 15 seconds |
 | End of the output | `[OK] Build completed successfully!` |
@@ -139,7 +139,7 @@ All three modes end in DEGRADED: the Guardian discards the injected readings, so
 
 A and B together take priority over a single button. The Guardian column follows the rules in [`battery-thermal-guardian.md`](battery-thermal-guardian.md), sections State machine and Signal integrity.
 
-More on the display, the LEDs and the threads: [`az3166-firmware/app/FEVengersApp/SETUP.md`](../az3166-firmware/app/FEVengersApp/SETUP.md).
+More on the display, the LEDs and the threads: `app/FEVengersApp/SETUP.md`, which the patch adds.
 
 ## 8. Not the variant of `Threadx_AZ3166_MQTT_Temp_Source.md`
 
@@ -155,26 +155,34 @@ That document describes changes to the `app/mqtt` sample of the same ThreadX rep
 
 Topic, port and the two fields the publisher reads are the same in both.
 
-## 9. Where the code comes from
+## 9. What is in this repository
 
-`az3166-firmware/` is the folder `MXChip/AZ3166/` of [eclipse-threadx/samplex](https://github.com/eclipse-threadx/samplex) at commit `c1adc67`, under the MIT licence (`az3166-firmware/LICENSE`; the ST, CMSIS and SSD1306 parts keep their own licence files), with these changes:
+Only our changes, as one patch against samplex `main` at commit `c1adc67`: [`az3166-firmware/fevengersapp-vs-samplex.patch`](../az3166-firmware/fevengersapp-vs-samplex.patch). Paths are under `MXChip/AZ3166/` of samplex:
 
 | File | Change |
 |---|---|
-| `app/FEVengersApp/` | New: the application (`main.c`, `cloud_config.h`) and its notes |
+| `app/FEVengersApp/` | New: the application (`main.c`, `cloud_config.h`) and its notes (`README.md`, `SETUP.md`, `OUTSIDE_FOLDER_CHANGES.md`) |
 | `app/CMakeLists.txt` | Registers the configuration `FEVengersApp` |
 | `lib/mxchip_bsp/ssd1306/ssd1306.c` | I2C writes to the display time out after 100 ms instead of waiting forever |
 | `lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c` | The data-ready timeout is reset on every read; a failed I2C read keeps the last good value instead of producing a fixed wrong one |
-| `.gitignore` | New: ignores `build/`, keeps the prebuilt Wi-Fi library `lib/wiced_sdk/lib/libwiced_sdk_bin.a` |
 
-The two driver fixes are explained in [`OUTSIDE_FOLDER_CHANGES.md`](../az3166-firmware/app/FEVengersApp/OUTSIDE_FOLDER_CHANGES.md). The other configurations of the upstream folder (`starter`, `arcade`, `telemetry`, `mqtt`) are unchanged and not used. `az3166-firmware/README.md` is the upstream README.
+The two driver fixes are explained in `OUTSIDE_FOLDER_CHANGES.md`. The other configurations of samplex (`starter`, `arcade`, `telemetry`, `mqtt`) are not changed and not used.
+
+After a change to the firmware, write the patch again from the root of the samplex clone, with `WIFI_SSID` and `WIFI_PASSWORD` emptied first:
+
+```bash
+git add -N MXChip/AZ3166/app/FEVengersApp
+git diff c1adc67 -- MXChip/AZ3166 > <repo>/az3166-firmware/fevengersapp-vs-samplex.patch
+```
 
 ## 10. Status
 
 | Item | State |
 |---|---|
-| Build of `FEVengersApp` from the files in this repository (the tracked files and the two submodules, copied to an empty folder) | Run: `[OK] Build completed successfully!`, 14 s, `mxchip_threadx.bin` 343,856 bytes, Arm GNU Toolchain 13.3.rel1, CMake 3.22.1, Ninja 1.10.1, Ubuntu 22.04 |
-| Flash, Wi-Fi and MQTT connection, data through to the Guardian, the three fault modes | Run with the board, built from this repository with the Wi-Fi settings filled in |
-| Fresh clone from GitHub, `git submodule update --init`, `./scripts/build.sh FEVengersApp clean` | Run: both submodules checked out at the pinned commits (30 s), build completed (14 s), `mxchip_threadx.bin` written; `git status` stays clean after the build |
+| samplex cloned from GitHub at `c1adc67`, the two submodules, `git apply --check` and `git apply` of the patch | Run: applies without a message; three files modified, `app/FEVengersApp/` new |
+| The patched tree against the sources that were flashed | Run: the eight files of the patch are byte for byte the ones built and run on the board; nothing else differs from upstream |
+| `./scripts/build.sh FEVengersApp clean` in the patched clone | Run: `[OK] Build completed successfully!`, 15 s, `mxchip_threadx.bin` 343,856 bytes, Arm GNU Toolchain 13.3.rel1, CMake 3.22.1, Ninja 1.10.1, Ubuntu 22.04 |
+| Flash, Wi-Fi and MQTT connection, data through to the Guardian, the three fault modes | Run with the board from these sources (before they were reduced to a patch), with the Wi-Fi settings filled in. Not repeated from a patched clone |
 | `./scripts/deploy.sh` without a board | Run with a folder in place of the board's drive: the `.bin` is copied; with a destination that does not exist it stops with an error |
+| Writing the patch again with the commands of section 9, in the patched clone | Run: the result is identical to the patch in this repository |
 | Build on Windows or macOS (`build.ps1`, `deploy.ps1`) | Not run |

@@ -1,6 +1,0 @@
-# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
-# Build output of scripts/build.sh.
-build/
-# Prebuilt Wi-Fi library the build links against; the repository's top-level
-# .gitignore would drop it (*.a).
-!lib/wiced_sdk/lib/libwiced_sdk_bin.a

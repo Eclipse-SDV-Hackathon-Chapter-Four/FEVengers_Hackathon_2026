@@ -1,0 +1,1767 @@
+diff --git a/MXChip/AZ3166/app/CMakeLists.txt b/MXChip/AZ3166/app/CMakeLists.txt
+index 79a0fa4..a42afd2 100644
+--- a/MXChip/AZ3166/app/CMakeLists.txt
++++ b/MXChip/AZ3166/app/CMakeLists.txt
+@@ -63,6 +63,13 @@ elseif(APP_CONFIG STREQUAL "mqtt")
+         ${CONFIG_DIR}/main.c
+         ${CONFIG_DIR}/cloud_config.h
+     )
++elseif(APP_CONFIG STREQUAL "FEVengersApp")
++    list(APPEND SOURCES
++        ${COMMON_DIR}/board_init.c
++        ${COMMON_DIR}/screen.c
++        ${CONFIG_DIR}/main.c
++        ${CONFIG_DIR}/cloud_config.h
++    )
+ else() # starter
+     list(APPEND SOURCES
+         ${COMMON_DIR}/board_init.c
+diff --git a/MXChip/AZ3166/app/FEVengersApp/OUTSIDE_FOLDER_CHANGES.md b/MXChip/AZ3166/app/FEVengersApp/OUTSIDE_FOLDER_CHANGES.md
+new file mode 100644
+index 0000000..6cc4bca
+--- /dev/null
++++ b/MXChip/AZ3166/app/FEVengersApp/OUTSIDE_FOLDER_CHANGES.md
+@@ -0,0 +1,79 @@
++# Changes Outside app/FEVengersApp/
++
++> Generated with AI assistance (Claude Sonnet 5, model id: `claude-sonnet-5`).
++
++Everything else in this project's history stayed inside `app/FEVengersApp/`
++(plus the one, separately-tracked `app/CMakeLists.txt` registration block
++from setup - see `SETUP.md`). This file exists specifically because solving
++the "screen/sensor freeze" bug (see `SETUP.md`'s bug log) required editing
++two vendor driver files under `lib/mxchip_bsp/`, with the user's explicit
++go-ahead. Both are real, confirmed bugs - not workarounds - and would
++benefit any app in this repo that uses the OLED or the HTS221 sensor, not
++just `FEVengersApp`.
++
++## 1. `lib/mxchip_bsp/ssd1306/ssd1306.c` - unbounded I2C timeout
++
++`ssd1306_WriteCommand()` / `ssd1306_WriteData()` called
++`HAL_I2C_Mem_Write(..., HAL_MAX_DELAY)` - no timeout at all. If an I2C
++transaction ever glitched, these calls could hang forever, freezing
++whichever thread called them - and since `FEVengersApp/main.c` wraps OLED
++writes in a mutex shared with the HTS221 sensor read, a hang here also
++froze MQTT/the RGB LED/the sensor the moment they needed that same mutex.
++
++**Fix:** bounded the timeout to `SSD1306_I2C_TIMEOUT_MS` (100ms) instead of
++`HAL_MAX_DELAY`. Function signatures (`void`) are unchanged, so every
++existing caller (all four `app/` configs, not just `FEVengersApp`) keeps
++working as-is - a failed write now just times out and returns instead of
++hanging, rather than every caller needing to change to handle a new return
++value.
++
++## 2. `lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c` - two bugs
++
++**a) `static uint32_t timeout = 5;`** was a function-static variable,
++initialized once for the entire program's lifetime and only ever
++decremented, never reset. After roughly the first 5 "sensor not ready yet"
++waits anywhere in the program's run, the data-ready check
++(`while (... && timeout > 0)`) became a permanent no-op for every
++subsequent call to `hts221_data_read()`.
++
++**Fix:** moved `timeout` to be a local variable, reset to `5` on every call.
++
++**b) Ignored I2C read error status.** `hts221_data_read()` called
++`hts221_humidity_raw_get()` / `hts221_temperature_raw_get()` - both of
++which return an I2C error status - without ever checking it. Each call was
++preceded by `memset(..., 0x00, ...)` zeroing the raw-value buffer. So a
++transient I2C read failure left the buffer at zero, and
++`linear_interpolation()` still ran on it, producing a **fixed, deterministic
++"phantom" reading** (the calibration curve's value at raw ADC = 0) -
++indistinguishable from a real reading except that it never changes. This
++exactly matched what was observed: temperature frozen at one exact value
++(no sensor noise/drift at all) for many consecutive 0.5s reads, while
++everything else (MQTT, buttons, LED) kept working.
++
++**Fix:** check both return statuses. On success, compute and store the
++reading as before. On failure, keep the last known-good reading (a new
++file-static `last_good_reading`) instead of computing from a zeroed buffer.
++`hts221_data_read()`'s return type/signature is unchanged.
++
++## What this means for other app configs
++
++`starter`/`telemetry`/`mqtt`/`arcade` all link against this same
++`mxchip_bsp` library and the same sensor driver, so they get both fixes too
++- for free, with no code changes needed on their side (same function
++signatures, same behavior on success, just more resilient on transient I2C
++failures).
++
++## Verification
++
++```bash
++./scripts/build.sh FEVengersApp clean
++```
++Both changed files show up in the ninja build output
++(`lib/mxchip_bsp/CMakeFiles/mxchip_bsp.dir/stm_sensor/Src/
++hts221_read_data_polling.c.obj` and `.../ssd1306/ssd1306.c.obj`), confirming
++they're actually compiled in. Full diff:
++
++```bash
++git diff -- MXChip/AZ3166/lib/mxchip_bsp/ssd1306/ssd1306.c \
++            MXChip/AZ3166/lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c
++```
+diff --git a/MXChip/AZ3166/app/FEVengersApp/README.md b/MXChip/AZ3166/app/FEVengersApp/README.md
+new file mode 100644
+index 0000000..fead793
+--- /dev/null
++++ b/MXChip/AZ3166/app/FEVengersApp/README.md
+@@ -0,0 +1,83 @@
++# FEVengersApp
++
++> Generated with AI assistance (Claude Sonnet 5, model id: `claude-sonnet-5`).
++
++Team FEVengers' app for the MXChip AZ3166 board. See [SETUP.md](SETUP.md) for
++the background (why a new `elseif(APP_CONFIG STREQUAL "FEVengersApp")` block
++was added to `app/CMakeLists.txt`, screen/Wi-Fi behavior, color limitation).
++This file is just the quick compile/flash cheat-sheet with real example
++commands.
++
++## Compile
++
++From `MXChip/AZ3166/`:
++
++```bash
++# Linux/macOS
++./scripts/build.sh FEVengersApp
++```
++
++```powershell
++# Windows
++.\scripts\build.ps1 -Config FEVengersApp
++```
++
++If you (or a teammate) already built another config (e.g. `starter`) in this
++same `build/` folder, add `clean` the first time you switch, otherwise the
++old config gets silently rebuilt instead:
++
++```bash
++./scripts/build.sh FEVengersApp clean
++```
++
++Example of a verified successful run:
++
++```
++$ ./scripts/build.sh FEVengersApp clean
++...
++[1144/1144] ... arm-none-eabi-objcopy -Obinary mxchip_threadx.elf mxchip_threadx.bin
++==========================================
++[OK] Build completed successfully!
++Build time: 13s
++==========================================
++```
++
++Output binary: `MXChip/AZ3166/build/app/mxchip_threadx.bin`.
++
++## Flash
++
++Plug the AZ3166 into USB — it mounts as a removable drive (no ST-Link /
++OpenOCD / DFU needed).
++
++Find the mount path:
++
++```bash
++lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT
++```
++
++Look for the row with `LABEL` = `AZ3166`. On this machine it showed up as:
++
++```
++sda   1M  vfat  AZ3166  /media/sinanc/AZ3166
++```
++
++Then deploy with that path:
++
++```bash
++# Linux/macOS - replace with YOUR mount path from lsblk/df
++./scripts/deploy.sh /media/sinanc/AZ3166
++```
++
++```powershell
++# Windows - replace with the board's drive letter
++.\scripts\deploy.ps1 -Destination D:
++```
++
++Copying the `.bin` triggers the bootloader; the board resets and runs the
++new code automatically.
++
++## Monitor serial output
++
++Connect to the board's serial port at **115200 baud** (Tera Term on Windows,
++`screen`/`minicom`/SerialTools on Linux/macOS) to see boot and Wi-Fi
++connection logs.
+diff --git a/MXChip/AZ3166/app/FEVengersApp/SETUP.md b/MXChip/AZ3166/app/FEVengersApp/SETUP.md
+new file mode 100644
+index 0000000..edbe5a6
+--- /dev/null
++++ b/MXChip/AZ3166/app/FEVengersApp/SETUP.md
+@@ -0,0 +1,458 @@
++# FEVengersApp - Setup Notes
++
++> Generated with AI assistance (Claude Sonnet 5, model id: `claude-sonnet-5`).
++
++This folder hosts the team's own application for the MXChip AZ3166 board.
++It follows the same convention as `starter`/`telemetry`/`mqtt`/`arcade`: every
++app lives in its own folder under `app/`, with shared code coming from
++`app/common/`.
++
++## a) Change made outside this folder
++
++The following `elseif` block was added to `MXChip/AZ3166/app/CMakeLists.txt`,
++between the `mqtt` block and the `else()` (starter) block:
++
++```cmake
++elseif(APP_CONFIG STREQUAL "FEVengersApp")
++    list(APPEND SOURCES
++        ${COMMON_DIR}/board_init.c
++        ${COMMON_DIR}/screen.c
++        ${CONFIG_DIR}/main.c
++        ${CONFIG_DIR}/cloud_config.h
++    )
++```
++
++Without this registration, `APP_CONFIG=FEVengersApp` wouldn't be recognized
++and the build would silently fall through to the `starter` branch. Board
++init (`board_init.c`) and the screen (`screen.c`) reuse the shared
++`app/common/` files as-is — nothing was copied.
++
++**This is no longer the only change outside this folder.** Diagnosing a
++screen/sensor freeze (see the bug log further down) led to two real,
++confirmed bugs in `lib/mxchip_bsp/` (the OLED and HTS221 sensor drivers,
++shared by every `app/` config). With explicit go-ahead, those were fixed
++directly rather than only worked around - see
++**[OUTSIDE_FOLDER_CHANGES.md](OUTSIDE_FOLDER_CHANGES.md)** for exactly what
++and why.
++
++## b) Compile
++
++```bash
++# Linux/macOS
++./scripts/build.sh FEVengersApp
++
++# Windows
++.\scripts\build.ps1 -Config FEVengersApp
++```
++
++Under the hood, the script runs, from the `build/` directory:
++`cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DAPP_CONFIG=FEVengersApp -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..`
++followed by `ninja`. Output binary:
++`MXChip/AZ3166/build/app/mxchip_threadx.bin`.
++
++Pass `clean`/`rebuild` as a second argument for a clean build
++(`./scripts/build.sh FEVengersApp clean`).
++
++**Gotcha:** `build.sh`/`build.ps1` only re-run CMake configure when
++`build/CMakeCache.txt` doesn't exist yet. If you already built another config
++(e.g. `starter`) in the same `build/` folder, switching to
++`./scripts/build.sh FEVengersApp` alone will **silently keep building the old
++config** (CMake prints `Building application with configuration: starter`
++even though you asked for `FEVengersApp`). Always pass `clean` the first time
++you switch `APP_CONFIG`: `./scripts/build.sh FEVengersApp clean`. Verified
++locally — this build was confirmed to actually compile `FEVengersApp/main.c`
++(with Wi-Fi, OLED, fault modes, RGB LED, and MQTT with its own dedicated
++internal-client stack: RAM 71.5%, FLASH 32.7% used) and produced
++`mxchip_threadx.bin`/`.hex`.
++
++## c) Flash
++
++The AZ3166 doesn't use ST-Link/OpenOCD/DFU; it's programmed via USB
++mass-storage drag-and-drop. When plugged into USB, the board mounts as a
++disk drive.
++
++```bash
++# Linux/macOS - <mount-path> is where the board is mounted
++./scripts/deploy.sh <mount-path>
++
++# Windows - <drive-letter> is the board's drive letter
++.\scripts\deploy.ps1 -Destination <drive-letter>
++```
++
++Copying the `.bin` file onto the board triggers the bootloader; the board
++automatically resets and runs the new code. Monitor the serial output at
++**115200 baud** (Tera Term / SerialTools, etc.).
++
++## Note: main.c / cloud_config.h
++
++`main.c` and `cloud_config.h` were copied from `app/starter` as the starting
++point and carry a header noting they were generated with AI assistance
++(Claude Sonnet 5, model id `claude-sonnet-5`). In this repository `cloud_config.h`
++has an empty `WIFI_SSID` and `WIFI_PASSWORD`: fill them in before building.
++
++## Screen output
++
++`main.c` draws 5 OLED lines, redrawn together whenever any of them changes:
++- **Line 0:** `FEVengers` (app name, static)
++- **Line 1:** Wi-Fi + MQTT status, compact symbols — `WiFi:- MQTT:-` while
++  connecting, `V` once connected, `X` if it failed (e.g. `WiFi:V MQTT:X`)
++- **Line 2:** live A/B button state — `A:UP B:UP` / `A:DOWN B:UP` / etc. (raw
++  press state, independent of the fault-mode gestures below)
++- **Line 3:** current fault mode — `MODE: NORMAL` / `MODE: STUCK` /
++  `MODE: DROPOUT` / `MODE: OUT OF RNG`
++- **Line 4:** the battery temperature actually being sent — `Temp: 32.4C`
++  (frozen during `STUCK`/`DROPOUT`, matching what was last published)
++
++These 5 rows don't fit `screen.h`'s `L0..L3` spacing (18px apart, only 4 slots
++in 64px), so rows 1-4 use custom tighter y-coordinates (`ROW_WIFI`=18,
++`ROW_BUTTONS`=29, `ROW_MODE`=40, `ROW_TEMP`=51 in `main.c`) instead of the
++`L1`/`L2`/`L3` enum.
++
++**Color note:** the board's onboard display is an SSD1306 OLED, which is
++monochrome — the driver only knows `Black` (pixel off) and `White` (pixel
++on). There is no red, or any other color, option in the hardware or the
++`ssd1306` driver, so the text is shown in the display's native color
++(white/blue depending on the physical panel), not red.
++
++**Font note:** only `Font_7x10`/`Font_11x18` are compiled into this project's
++shared ssd1306 library (`Font_6x8` is commented out in
++`lib/mxchip_bsp/ssd1306/ssd1306_conf.h`, outside this folder — not touched).
++At `Font_7x10`, the 128px screen fits 18 characters, which is why line 3 says
++`MODE: STUCK`/`MODE: DROPOUT` rather than a longer `STUCK SENSOR`/`SENSOR
++DROPOUT` label.
++
++## MQTT publishing (Doctor Whodunit)
++
++Once Wi-Fi connects, a third thread (`mqtt_thread_entry`) connects to an MQTT
++broker and, **every 1s**, reads the real onboard HTS221 temperature sensor
++(`hts221_data_read()` from `sensor.h`/`lib/mxchip_bsp/stm_sensor` — already
++initialized by the shared `app/common/board_init.c`, no extra init needed)
++and publishes to a **single topic**, `FEVengers_MQTT/telemetry`:
++```json
++{"temperature_degC": 25.6, "counter": 12}
++```
++(`counter` is the `sequence` variable in `main.c` - the notes below still
++call it `sequence`.)
++That's the whole payload - no `timestamp_ms`, no `ecu_id`/`status`, no
++`fault_mode`/mode field. There used to be a second, separate heartbeat
++topic/message; it was folded into this one on purpose (simpler for the
++Guardian side to parse one shape) - **there is no longer an independent
++"ECU alive" signal separate from the temperature message**, so `DROPOUT`
++(below) now means total silence on this topic, not just the temperature
++part of it.
++
++`sequence` is a **rolling counter**, wrapping `0-255` (`SEQUENCE_WRAP` in
++`main.c`) instead of growing forever. It:
++- advances normally in `NORMAL` and `OUT_OF_RANGE`,
++- **freezes (stops incrementing) while `STUCK` is active** - same "frozen"
++  signature as `temperature_degC` itself during `STUCK` - and resumes the
++  instant `STUCK` ends,
++- simply doesn't advance during `DROPOUT` either, since nothing is
++  published then at all.
++
++### Fault modes
++
++Button reading lives entirely in `button_thread_entry` (100ms poll, the
++sole owner of `BUTTON_A_IS_PRESSED`/`BUTTON_B_IS_PRESSED` and the sole
++writer of `fault_mode`). Fault modes are **held-button based, not
++click/toggle**: a mode is active only while the triggering button(s) are
++physically down, and clears the instant they're released - no delay, no
++click-counting ambiguity.
++
++| Buttons held | Mode | Behavior |
++|---|---|---|
++| A only | `STUCK` | Freezes `temperature_degC` at the real sensor reading from the moment A was pressed, **and freezes `sequence` too** (both stay unchanged, message still sent every tick). Release A to go live again. |
++| B only | `DROPOUT` | No message published at all - total silence on the topic (no separate heartbeat channel anymore to show the ECU is still alive). Release B to resume. |
++| A + B together | `OUT OF RANGE` | Publishes a synthetic ramp: starts from the real sensor reading at the moment both were pressed and climbs `20°C` per tick (`OUT_OF_RANGE_STEP_C`) until it reaches `160°C` (`OUT_OF_RANGE_MAX_C`), then holds there; `sequence` advancing normally. Release either to clear. |
++| neither | `NORMAL` | Publishes the real sensor reading, `sequence` advancing normally. |
++
++A+B held together takes priority over the single-button cases. (An earlier
++version also had a `SPIKE` one-shot on an A double-click; it was removed -
++the double-click detection window made every A click, including the
++intended "release to exit STUCK", wait ~400ms before committing, which felt
++like the mode getting stuck.)
++
++### RGB LED
++
++`set_fault_led()` drives the onboard RGB LED via the PWM macros already
++exposed by `app/common/board_init.h` (`RGB_LED_SET_R/G/B`, already
++initialized - nothing new to set up): **green** while `fault_mode ==
++NORMAL`, **red** for any active fault.
++
++### User LED heartbeat
++
++The board's onboard "User" LED (the one printed `USER` on the silkscreen;
++`USER_LED_ON()`/`USER_LED_OFF()` in `app/common/board_init.h`, plain GPIOC
++digital I/O, not I2C) toggles on/off every 0.5s, first thing in
++`mqtt_thread_entry`'s loop. Placed in this specific thread on purpose: its
++I2C wait is now bounded (see the next note), so it can't be dragged down by
++a `display_thread_entry` hang the way a heartbeat living in
++`display_thread_entry` itself could be. A steadily blinking User LED is a
++genuine "this thread's loop - sensor read, fault mode, RGB LED, MQTT - is
++still alive" signal, independent of whether the OLED is currently
++responding - useful for telling apart "the whole board is still running,
++just the screen is stuck" from "the board is fully hung" without needing
++to reach for a reset button to find out.
++
++**Fixed bug: LED fighting itself / wrong colors.** `app/common/stm32cubef4/
++stm32f4xx_hal_msp.c` (compiled into every `APP_CONFIG`, including this one)
++enables the A/B button EXTI interrupts at the NVIC level, and `app/common/
++board_init.c` defines `__weak button_a_callback()`/`button_b_callback()`
++that fire on every real press and independently stomp the RGB LED with
++their own demo ramp (plus toggle the WIFI/CLOUD/USER LEDs) - directly
++fighting `set_fault_led()`. Fixed, entirely within this folder, by defining
++real (non-`__weak`) `button_a_callback()`/`button_b_callback()` in `main.c`
++with empty bodies - this overrides the weak ones at link time, the same
++mechanism `app/arcade/button_handler.c` already uses. Our own button
++handling is poll-based and never depended on these interrupts anyway.
++
++**Fixed bug: screen blank after flash/reset, only came back after
++unplugging/replugging USB.** The OLED (`ssd1306_*`, used by
++`display_thread_entry`) and the HTS221 temperature sensor
++(`hts221_data_read()`, used by `mqtt_thread_entry`) sit on the **same
++physical I2C1 bus/HAL handle**. With no synchronization, two threads could
++call into the HAL I2C driver at the same time, corrupting its internal
++state and potentially wedging the bus at the hardware level (SCL/SDA stuck)
++- a soft reset (reset button, or the bootloader's post-flash reset) doesn't
++clear that, only removing power does (which is exactly what "unplug and
++replug" does). Fixed by adding a `TX_MUTEX i2c_mutex` (created in
++`tx_application_define`) around every I2C access: the whole `draw_screen()`
++sequence in `display_thread_entry`, and the `hts221_data_read()` call in
++`mqtt_thread_entry`. This only became an issue once `mqtt_thread_entry`
++started doing real sensor reads concurrently with the OLED thread - the
++single-threaded screen-only version never hit it.
++
++**MQTT broker is now real and connect is enabled again.**
++`MQTT_LOCAL_BROKER_IP` is set to the team's actual broker, via the new
++`MQTT_BROKER_PORT` define (`1883`, used in `nxd_mqtt_client_connect()`
++instead of the library's default `NXD_MQTT_PORT`), and
++`MQTT_BROKER_CONFIGURED` is back to `1`. The IP went through two values:
++`192.168.1.42` first failed to connect because it's on a **different
++subnet** than the board's Wi-Fi (`192.168.88.x`, confirmed via the boot
++log's `IP address: 192.168.88.247`); updated to `192.168.88.28`, on the
++same subnet as the board.
++
++Earlier, a full system hang (not recoverable by the reset button, only by a
++power cycle) was observed shortly after an `nxd_mqtt_client_connect()`
++attempt against the then-placeholder broker timed out, so
++`MQTT_BROKER_CONFIGURED` was temporarily set to `0` to skip the MQTT
++connect entirely and isolate it as a suspect. **That test came back
++negative: the same hang reproduced even with MQTT connect fully disabled**,
++so the placeholder/unreachable broker was ruled out as the (sole) cause -
++whatever is actually wedging the system is elsewhere, most likely still
++I2C-related (see the OLED-reset notes below), not MQTT/networking. Kept
++disabled only long enough to run that test; re-enabled now that a real
++broker is configured, since a working broker is also simply needed for the
++submission regardless.
++
++**Root cause found AND FIXED for "screen and sensor froze, exact same
++temperature value repeated forever": a real bug in
++`lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c` - see
++[OUTSIDE_FOLDER_CHANGES.md](OUTSIDE_FOLDER_CHANGES.md) for the actual fix.**
++`hts221_data_read()` used to do:
++```c
++memset(data_raw_temperature.u8bit, 0x00, sizeof(int16_t));
++hts221_temperature_raw_get(&dev_ctx, data_raw_temperature.u8bit); // return value ignored!
++reading.temperature_degC = linear_interpolation(&lin_temp, data_raw_temperature.i16bit);
++```
++`hts221_temperature_raw_get()` does return an I2C error status, but it
++wasn't checked. If the underlying `HAL_I2C_Mem_Read` silently failed, the
++buffer stayed at the `memset`'d zero (not the previous reading), so
++`linear_interpolation` computed a **fixed, deterministic "phantom" value**
++from the calibration curve at raw=0 - explaining the observed behavior
++exactly: a repeating, noise-free temperature (e.g. `20.8` for 8+
++consecutive 0.5s reads) instead of the usual small real-sensor drift. The
++same file also had the earlier-found `static uint32_t timeout = 5;` that
++was never reset. Both are now fixed directly in that file (with explicit
++go-ahead to edit outside this folder) - see
++[OUTSIDE_FOLDER_CHANGES.md](OUTSIDE_FOLDER_CHANGES.md).
++
++**Also added (within this folder, kept even after the real fix above): a
++diagnostic that would have confirmed the bug without needing to touch the
++driver file, and still catches anything similar in the future.**
++`mqtt_thread_entry` tracks consecutive bit-identical `hts221_data_read()`
++results; after 4 in a row (~2s) and then every 10 more, it logs a `WARNING`
++(with `HAL_I2C_GetState`) over serial. Also logs when the 0.5s `i2c_mutex`
++wait itself times out (distinct from the sensor returning a bad value while
++the mutex is fine).
++
++**Fixed bug in that diagnostic itself: the logged temperature showed up
++empty (`"(C)"` with nothing before it).** Both `WARNING` messages above used
++plain `printf("... %.1fC ...", ...)` directly - but this project's `printf`
++(newlib-nano, linked without float-in-printf support) doesn't reliably
++format `%f`/`%.1f`. Only `npf_snprintf` (nanoprintf's own formatter)
++handles floats correctly here - which is exactly why
++`publish_temperature()`/`publish_heartbeat()` already built their JSON into
++a buffer with `npf_snprintf` instead of calling `printf` directly. Both
++diagnostic messages now do the same (build with `npf_snprintf`, then
++`printf("%s", ...)`), so the actual frozen value is visible in the log.
++
++**Added: real I2C bus recovery (GPIO bit-banging), triggered by actual
++observed failures, not just HAL state.** Even after the two vendor-driver
++fixes above, the same pattern kept recurring (confirmed three times in
++testing): MQTT/heartbeat/the User LED kept working, but the OLED and the
++sensor reading both froze together. This means the I2C bus can get
++genuinely stuck at the **hardware** level (a slave device - the OLED or the
++HTS221 - holding SDA low mid-byte), which `HAL_I2C_DeInit()`+`HAL_I2C_Init()`
++alone can't fix (they only reset the STM32's own master-side peripheral
++state, not a slave physically holding the bus) - and `HAL_I2C_GetState()`
++isn't reliable for detecting it either (the master's software state can
++still read as "ready" while a slave is stuck). Added `i2c_bus_recover()`:
++takes I2C1's SCL/SDA pins (PB8/PB9 - matching
++`app/common/stm32cubef4/stm32f4xx_hal_msp.c`'s `HAL_I2C_MspInit()` exactly,
++read-only reference, not edited) over as plain GPIO, manually clocks SCL up
++to 9 times to let a stuck slave finish whatever byte it's waiting on and
++release SDA, issues a manual STOP condition, then hands the pins back to
++the I2C peripheral and re-inits it. Triggered from two places: as an
++escalation inside `recover_i2c_if_stuck()` when the cheap DeInit/Init fix
++doesn't bring the state back to ready, and - the more reliable trigger -
++directly from the "same value N times in a row" diagnostic above, since
++that's **evidence from actual data** that reads are failing, independent of
++what `HAL_I2C_GetState()` reports.
++
++**Also slowed `display_thread_entry`'s poll/redraw-check interval from
++0.1s to 0.5s** - fewer checks per second means fewer chances to redraw (and
++therefore fewer OLED I2C writes); the temperature itself only changes once
++a second now anyway, so checking 10x/s was more than needed. Buttons/mode
++still show up on screen within half a second.
++
++**Also slowed the sensor-read/MQTT-publish cadence from 0.5s to 1s**
++(`tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND)` instead of `/ 2`) - halves I2C
++bus traffic, on the theory that less-frequent transactions give whatever
++causes the lockup fewer chances to trigger. A mitigation on top of the real
++fix above, not a fix by itself.
++
++**Fixed: buttons/LED responded very late, and MQTT showed a stale
++temperature, whenever the OLED got stuck for an extended stretch.** Button
++reading and `fault_mode` used to live in `display_thread_entry` - the same
++thread that can stall for a long time inside the OLED's I2C write (see
++below). While stuck, that thread couldn't get back around to its loop top
++to re-read the buttons, so `fault_mode` (and therefore the RGB LED) only
++caught up once the screen un-stuck itself - "ledler çok geç tepki veriyor".
++Split button reading out into its own `button_thread_entry` (a 4th thread,
++registered in `tx_application_define`): it touches no I2C/no mutex at all
++(`BUTTON_A/B_IS_PRESSED` are plain GPIO register reads) and is now the sole
++writer of `fault_mode`. `display_thread_entry` only reads `fault_mode` for
++display. Buttons -> RGB LED -> MQTT's fault-mode-driven publish decision
++are now fully independent of whether the OLED is currently stuck.
++
++**Confirmed AND FIXED: MQTT stopped along with the screen in one run,
++pointing squarely at `i2c_mutex` being held forever.**
++`ssd1306_WriteCommand()`/`ssd1306_WriteData()` (`lib/mxchip_bsp/ssd1306/
++ssd1306.c`) used to call `HAL_I2C_Mem_Write(..., HAL_MAX_DELAY)` - an
++unbounded wait. If that call ever truly hung inside
++`display_thread_entry`'s `draw_screen()` (not just silently no-ops, as the
++earlier hypothesis below assumed, but genuinely never returning),
++`display_thread_entry` never reached `tx_mutex_put()` and held `i2c_mutex`
++forever. Since `mqtt_thread_entry` used to wait `TX_WAIT_FOREVER` for that
++same mutex before every sensor read, it would then freeze too - exactly
++matching an observed run where both the OLED *and* MQTT publishing stopped
++together with no button pressed. **Fixed directly** (with explicit
++go-ahead): `HAL_MAX_DELAY` is now a bounded 100ms timeout - see
++[OUTSIDE_FOLDER_CHANGES.md](OUTSIDE_FOLDER_CHANGES.md). Kept, as
++defense-in-depth, the earlier mitigation in this folder too:
++`mqtt_thread_entry`'s mutex wait is bounded
++(`TX_TIMER_TICKS_PER_SECOND / 2`, i.e. 0.5s) instead of forever - if the
++mutex can't be acquired in time, it reuses the last known temperature
++reading and keeps publishing/the LED alive for that tick instead of
++blocking.
++
++**Earlier, now-superseded hypothesis (kept for context - screen stops
++updating after a while, but buttons/LED/fault_mode keep working; this
++matched an earlier, different-looking occurrence before the MQTT-hang
++correlation above was found):**
++`ssd1306_WriteCommand()`/`ssd1306_WriteData()` (`lib/mxchip_bsp/ssd1306/
++ssd1306.c`) are `void` and never check `HAL_I2C_Mem_Write()`'s return
++status. If the HAL I2C peripheral ever lands in a non-`HAL_I2C_STATE_READY`
++state (a transient bus glitch, for instance), those calls can silently
++become no-ops - `draw_screen()` still runs top-to-bottom and releases
++`i2c_mutex` normally (so buttons/`fault_mode`/the LED/the sensor read all
++keep working, matching what was reported), but nothing new actually reaches
++the physical screen. Added `recover_i2c_if_stuck()` in `main.c`: before each
++OLED draw and each sensor read (both already inside the `i2c_mutex`
++section), it checks `HAL_I2C_GetState(&I2cHandle)` and, if not ready,
++re-initializes the peripheral (`HAL_I2C_DeInit` + `HAL_I2C_Init` - safe to
++call again since `HAL_I2C_DeInit` doesn't touch `I2cHandle.Init`, so
++`HAL_I2C_Init` just reapplies `app/common/board_init.c`'s original I2C
++settings). `I2cHandle` is a plain global defined in
++`app/common/board_init.c` (not declared in `board_init.h`), referenced here
++via `extern I2C_HandleTypeDef I2cHandle;` - no file outside this folder was
++touched.
++
++**Sensor/LED/OLED no longer wait for Wi-Fi.** Originally `mqtt_thread_entry`
++opened with a blocking `while (wifi_state == WIFI_CONNECTING) { ... }` before
++doing anything else, so the OLED's `Temp:` line and the RGB LED stayed
++frozen until Wi-Fi finished connecting (plus the MQTT connect attempt) -
++even though reading the sensor and deciding the fault mode don't need a
++network at all. Restructured so the sensor/LED/OLED-temperature logic runs
++from the very first 0.5s tick unconditionally; the one-time MQTT client
++create/connect attempt now happens inline inside that same loop, gated on
++`wifi_state` itself (fires once, the first tick Wi-Fi is no longer
++`WIFI_CONNECTING`), instead of blocking everything ahead of it.
++
++**Broker is a placeholder.** `cloud_config.h`'s `MQTT_LOCAL_BROKER_IP` is the
++same placeholder IP used in `app/mqtt/cloud_config.h` — not a real address
++for the team's Input Handler. Update that one line once the broker is known.
++
++**Fixed bug: temperature/LED stopped updating entirely.** `mqtt_thread_stack`
++was being passed as the stack for *two different, concurrently-running*
++ThreadX threads at once: our own outer "MQTT Thread" (`mqtt_thread_entry`,
++created via `tx_thread_create`) **and** NetX Duo's own internal MQTT
++processing thread (via `nxd_mqtt_client_create`'s stack argument). Two
++threads sharing one physical stack buffer corrupt each other's stack frames
++the moment both are active - this silently broke the outer thread's loop
++(the one that reads the sensor, updates `displayed_temp`, and drives
++`set_fault_led()`), matching exactly what was reported: temperature frozen,
++LED never lighting. `app/mqtt/mqtt_client.c` avoids this with two distinct
++buffers (`mqtt_thread_stack` for the outer thread, `mqtt_client_stack` for
++NetX's internal one) - this folder now does the same, with a second buffer
++`mqtt_client_internal_stack` dedicated solely to `nxd_mqtt_client_create()`.
++
++**Fixed bug: everything worked at first, then froze after running a
++while.** Two contributing issues, both inside `mqtt_thread_entry`'s publish
++path:
++1. Temperature was published at **QOS1**, which requires a broker PUBACK to
++   complete. Against a flaky/placeholder broker that never (or
++   inconsistently) acks, unacked QOS1 messages queue up for retransmission
++   inside the NetX MQTT client - at a 0.5s publish cadence that queue grows
++   over time. Switched to **QOS0** (fire-and-forget) - nothing to retry or
++   accumulate, acceptable here since a fresh reading follows every 0.5s
++   anyway.
++2. `nxd_mqtt_client_disconnect_notify_set()`'s callback was wired up but did
++   nothing except `printf` - if the broker dropped the connection after a
++   while (plausible for a placeholder broker), the `mqtt_connected` flag
++   never got cleared, so the loop kept calling `nxd_mqtt_client_publish()`
++   against a dead connection, each call burning its full
++   `MQTT_PUBLISH_TIMEOUT_TICKS` - the app would still be running, just
++   crawling slower and slower, reading as "frozen". Fixed by making
++   `mqtt_connected` a shared variable the disconnect callback also writes
++   (`mqtt_connected = 0`), so a broker-side disconnect actually stops
++   further publish attempts instead of repeatedly stalling on a dead link.
++
++**Fixed bug: buttons appeared to do nothing.** The first version called
++`nxd_mqtt_client_connect`/`_publish` with `NX_WAIT_FOREVER`, inside the same
++thread that samples the buttons and decides `fault_mode`. Against the
++placeholder (likely unreachable) broker, that call either blocked forever or
++returned early with `return;` — either way the button-sampling loop never
++ran, so the OLED stayed on `MODE: NORMAL` no matter what was pressed. Fixed
++by: bounding connect (5s) and publish (2s) with real timeouts, never
++`return`-ing out of the thread on a connect failure, and gating only the
++`nxd_mqtt_client_publish` calls (not the button/fault-mode/OLED logic) behind
++a `mqtt_connected` flag. Buttons and the OLED now work correctly even with
++no reachable broker; publishing itself is naturally still a no-op until a
++real broker is configured.
++
++**Known pre-existing limitation (not fixed, out of scope - outside this
++folder):** `lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c`'s
++`hts221_data_read()` uses a `static uint32_t timeout = 5` as its
++data-ready-wait budget - it's initialized once and never reset, so after
++roughly the first 5 "not ready yet" waits across the whole program's
++lifetime, the data-ready check becomes a permanent no-op and the function
++just reads whatever is in the raw registers. In practice this is low-impact
++because `hts221_config()` enables Block Data Update (BDU), which makes the
++sensor itself hold a coherent MSB/LSB pair until both are read - so readings
++still update, just without the extra readiness guard. If temperature still
++looks unresponsive on real hardware after this fix, retest with the new
++held-button model first (a stuck-in-STUCK display was the likely cause
++before); this `timeout` quirk would need a fix in `lib/mxchip_bsp/`, outside
++`FEVengersApp/`.
+diff --git a/MXChip/AZ3166/app/FEVengersApp/cloud_config.h b/MXChip/AZ3166/app/FEVengersApp/cloud_config.h
+new file mode 100644
+index 0000000..6cc15e5
+--- /dev/null
++++ b/MXChip/AZ3166/app/FEVengersApp/cloud_config.h
+@@ -0,0 +1,66 @@
++/*
++ * Generated with AI assistance (Claude Sonnet 5, model id: claude-sonnet-5).
++ * Copied from app/starter/cloud_config.h as the starting point for FEVengersApp.
++ */
++
++/*
++ * Copyright (c) Microsoft
++ * Copyright (c) 2024 Eclipse Foundation
++ *
++ *  This program and the accompanying materials are made available
++ *  under the terms of the MIT license which is available at
++ *  https://opensource.org/license/mit.
++ *
++ *  SPDX-License-Identifier: MIT
++ *
++ *  Contributors:
++ *     Microsoft         - Initial version
++ *     Frédéric Desbiens - 2024 version.
++ */
++
++#ifndef _CLOUD_CONFIG_H
++#define _CLOUD_CONFIG_H
++
++#include "nx_api.h"
++
++typedef enum
++{
++    None         = 0,
++    WEP          = 1,
++    WPA_PSK_TKIP = 2,
++    WPA2_PSK_AES = 3
++} WiFi_Mode;
++
++// ----------------------------------------------------------------------------
++// WiFi connection config
++// ----------------------------------------------------------------------------
++// Fill in WIFI_SSID and WIFI_PASSWORD before building (2.4 GHz network only).
++// They are empty in the repository on purpose: do not commit them.
++#define HOSTNAME      "MxChip-FEV"  //Change to unique hostname.
++#define WIFI_SSID     ""
++#define WIFI_PASSWORD ""
++#define WIFI_MODE     WPA2_PSK_AES
++
++// ----------------------------------------------------------------------------
++// MQTT Config
++// ----------------------------------------------------------------------------
++#define MQTT_CLIENT_NAME       "FEVengersThreadX"  //Change to unique name.
++// Address of the machine that runs AutoSD (QEMU forwards its port 1883 to
++// the broker inside). "./autosd/autosd.sh status" prints the address to put
++// here; it must be on the same subnet as the board's Wi-Fi.
++#define MQTT_LOCAL_BROKER_IP   (IP_ADDRESS(192, 168, 88, 248))
++#define MQTT_BROKER_PORT       1883
++// Single topic for everything now - no separate heartbeat topic. Payload:
++// {"temperature_degC": <float>, "counter": <0-255 rolling counter>}.
++#define MQTT_TELEMETRY_TOPIC   "FEVengers_MQTT/telemetry"
++
++// Set to 0 to make mqtt_thread_entry skip nxd_mqtt_client_create/_connect
++// entirely (sensor reading, fault modes, the RGB LED, and the OLED are
++// unaffected either way - only actual MQTT publishing is gated by this).
++// Was temporarily 0 while MQTT_LOCAL_BROKER_IP was still a placeholder, to
++// rule it out as the cause of a reported hang - the hang still reproduced
++// with this at 0, so the placeholder/unreachable-broker connect was NOT
++// the (sole) cause. Re-enabled now that a real broker address is set.
++#define MQTT_BROKER_CONFIGURED 1
++
++#endif // _CLOUD_CONFIG_H
+diff --git a/MXChip/AZ3166/app/FEVengersApp/main.c b/MXChip/AZ3166/app/FEVengersApp/main.c
+new file mode 100644
+index 0000000..bf57c2f
+--- /dev/null
++++ b/MXChip/AZ3166/app/FEVengersApp/main.c
+@@ -0,0 +1,926 @@
++/*
++ * Generated with AI assistance (Claude Sonnet 5, model id: claude-sonnet-5).
++ * Copied from app/starter/main.c as the starting point for FEVengersApp.
++ */
++
++/*
++ * Copyright (c) Microsoft
++ * Copyright (c) 2024 Eclipse Foundation
++ *
++ *  This program and the accompanying materials are made available
++ *  under the terms of the MIT license which is available at
++ *  https://opensource.org/license/mit.
++ *
++ *  SPDX-License-Identifier: MIT
++ *
++ *  Contributors:
++ *     Microsoft         - Initial version
++ *     Frédéric Desbiens - 2024 version.
++ */
++
++#include <stdio.h>
++#include <string.h>
++
++#include "tx_api.h"
++
++#include "board_init.h"
++#include "cmsis_utils.h"
++#include "nanoprintf.h"
++#include "screen.h"
++#include "sensor.h"
++#include "ssd1306.h"
++#include "sntp_client.h"
++#include "wwd_networking.h"
++
++#include "cloud_config.h"
++
++// NetX Duo MQTT's defaults (12/32 bytes) are too small for our topic names
++// and JSON payloads - override before pulling in the addon header, same
++// approach as app/mqtt/mqtt_client.h.
++#define NXD_MQTT_MAX_TOPIC_NAME_LENGTH 40
++#define NXD_MQTT_MAX_MESSAGE_LENGTH    200
++#include "nxd_mqtt_client.h"
++
++#define ECLIPSETX_THREAD_STACK_SIZE 4096
++#define ECLIPSETX_THREAD_PRIORITY   4
++
++#define MQTT_THREAD_STACK_SIZE 5120
++#define MQTT_KEEP_ALIVE_TIMER  300
++#define QOS0                   0
++#define QOS1                   1
++
++// The single MQTT message's "counter" field rolls over at this value
++// instead of growing forever. 256 -> counter cycles 0-255 (fits a byte).
++#define SEQUENCE_WRAP 256
++
++// Bounded waits for the MQTT connect/publish calls. The placeholder broker
++// may be unreachable - these must NOT be NX_WAIT_FOREVER, otherwise a dead
++// broker freezes this thread forever and the button/fault-mode loop below
++// (which lives in the same thread) never runs, even though the buttons
++// themselves are fine.
++#define MQTT_CONNECT_TIMEOUT_TICKS (TX_TIMER_TICKS_PER_SECOND * 5)
++#define MQTT_PUBLISH_TIMEOUT_TICKS (TX_TIMER_TICKS_PER_SECOND * 2)
++
++// Protects every I2C bus access: the OLED (ssd1306_*, used by
++// display_thread_entry) and the HTS221 temperature sensor
++// (hts221_data_read(), used by mqtt_thread_entry) share the same physical
++// I2C1 bus/HAL handle. Without this mutex, two threads could call into the
++// HAL I2C driver at the same time, corrupting its internal state and
++// potentially wedging the bus at the hardware level (SCL/SDA stuck) -
++// which a soft reset doesn't clear, only a full power cycle does. This was
++// a real, reported bug: screen not coming up after flashing/reset, only
++// after unplugging/replugging USB.
++TX_MUTEX i2c_mutex;
++
++// Defined in app/common/board_init.c (I2C1_Init), not declared in
++// board_init.h. ssd1306_WriteCommand()/ssd1306_WriteData() are void and
++// never check HAL_I2C_Mem_Write()'s return status - if the HAL peripheral
++// ever lands in a non-READY state (e.g. a transient bus glitch), those
++// calls silently become no-ops: draw_screen() still runs and releases
++// i2c_mutex normally (so buttons/fault_mode/LED/sensor keep working, as
++// reported), but nothing new actually reaches the physical screen. See
++// recover_i2c_if_stuck() below.
++extern I2C_HandleTypeDef I2cHandle;
++
++// Crude busy-wait, good for a handful of microseconds - good enough for
++// bit-banged I2C recovery timing below, where exact timing doesn't matter
++// (this is a rare recovery path, not normal-operation I2C). Not using
++// HAL_Delay(): this project reconfigures SysTick for the ThreadX tick rate
++// (see systick_interval_set in tx_application_define), so HAL_Delay's
++// usual 1ms-SysTick assumption doesn't hold here.
++static void busy_wait_short(void)
++{
++    for (volatile int i = 0; i < 400; i++)
++    {
++    }
++}
++
++// I2C1 SCL=PB8/SDA=PB9, AF4_I2C1, open-drain with internal pull-up - must
++// match app/common/stm32cubef4/stm32f4xx_hal_msp.c's HAL_I2C_MspInit()
++// exactly (read-only reference, not edited).
++#define I2C_SCL_PIN GPIO_PIN_8
++#define I2C_SDA_PIN GPIO_PIN_9
++
++// Real I2C bus recovery: if a slave device (the OLED or the HTS221 sensor)
++// is stuck mid-byte holding SDA low, HAL_I2C_DeInit()+HAL_I2C_Init() alone
++// don't fix it - those only reset the STM32's own (master-side) peripheral
++// state, not a slave that's physically holding the bus. The standard fix
++// is to take SCL/SDA over as plain GPIO and manually clock SCL (idle SDA
++// high) up to 9 times - enough bits for a stuck slave to finish whatever
++// byte it's waiting on and release SDA - then issue a manual STOP
++// condition, and only then hand the pins back to the I2C peripheral. Must
++// be called with i2c_mutex already held.
++static void i2c_bus_recover(void)
++{
++    GPIO_InitTypeDef gpio = {0};
++    int i;
++
++    gpio.Mode  = GPIO_MODE_OUTPUT_OD;
++    gpio.Pull  = GPIO_PULLUP;
++    gpio.Speed = GPIO_SPEED_HIGH;
++
++    gpio.Pin = I2C_SCL_PIN;
++    HAL_GPIO_Init(GPIOB, &gpio);
++    gpio.Pin = I2C_SDA_PIN;
++    HAL_GPIO_Init(GPIOB, &gpio);
++
++    HAL_GPIO_WritePin(GPIOB, I2C_SCL_PIN, GPIO_PIN_SET);
++    HAL_GPIO_WritePin(GPIOB, I2C_SDA_PIN, GPIO_PIN_SET);
++    busy_wait_short();
++
++    for (i = 0; i < 9; i++)
++    {
++        if (HAL_GPIO_ReadPin(GPIOB, I2C_SDA_PIN) == GPIO_PIN_SET)
++        {
++            break; // SDA released - the stuck slave let go, no need to continue.
++        }
++        HAL_GPIO_WritePin(GPIOB, I2C_SCL_PIN, GPIO_PIN_RESET);
++        busy_wait_short();
++        HAL_GPIO_WritePin(GPIOB, I2C_SCL_PIN, GPIO_PIN_SET);
++        busy_wait_short();
++    }
++
++    // Manual STOP condition: SDA low->high while SCL is high.
++    HAL_GPIO_WritePin(GPIOB, I2C_SDA_PIN, GPIO_PIN_RESET);
++    busy_wait_short();
++    HAL_GPIO_WritePin(GPIOB, I2C_SCL_PIN, GPIO_PIN_SET);
++    busy_wait_short();
++    HAL_GPIO_WritePin(GPIOB, I2C_SDA_PIN, GPIO_PIN_SET);
++    busy_wait_short();
++
++    // Hand the pins back to the I2C peripheral - same config as
++    // HAL_I2C_MspInit() (AF4_I2C1, open-drain, internal pull-up).
++    gpio.Mode      = GPIO_MODE_AF_OD;
++    gpio.Pull      = GPIO_PULLUP;
++    gpio.Speed     = GPIO_SPEED_HIGH;
++    gpio.Alternate = GPIO_AF4_I2C1;
++    gpio.Pin       = I2C_SCL_PIN;
++    HAL_GPIO_Init(GPIOB, &gpio);
++    gpio.Pin       = I2C_SDA_PIN;
++    HAL_GPIO_Init(GPIOB, &gpio);
++
++    HAL_I2C_DeInit(&I2cHandle);
++    HAL_I2C_Init(&I2cHandle);
++}
++
++// Re-initializes the shared I2C peripheral if it's not in a ready state.
++// First tries the cheap, software-only fix (HAL_I2C_DeInit()+Init(), which
++// HAL_I2C_DeInit() doesn't touch I2cHandle.Init, so HAL_I2C_Init() just
++// reapplies app/common/board_init.c's I2C1_Init() settings) - but that
++// alone doesn't clear a slave physically holding the bus, so if the
++// peripheral is STILL not ready right after, escalates to the real GPIO-
++// level bus recovery above. Must be called with i2c_mutex already held.
++static void recover_i2c_if_stuck(void)
++{
++    if (HAL_I2C_GetState(&I2cHandle) != HAL_I2C_STATE_READY)
++    {
++        HAL_I2C_DeInit(&I2cHandle);
++        HAL_I2C_Init(&I2cHandle);
++
++        if (HAL_I2C_GetState(&I2cHandle) != HAL_I2C_STATE_READY)
++        {
++            i2c_bus_recover();
++        }
++    }
++}
++
++TX_THREAD eclipsetx_thread;
++TX_THREAD eclipsetx_thread2;
++TX_THREAD mqtt_thread;
++TX_THREAD button_thread;
++ULONG eclipsetx_thread_stack[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
++ULONG eclipsetx_thread_stack2[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
++// Button-polling thread's stack - see button_thread_entry for why it's
++// separate from display_thread_entry.
++ULONG button_thread_stack[ECLIPSETX_THREAD_STACK_SIZE / sizeof(ULONG)];
++// Stack for OUR OWN "MQTT Thread" (mqtt_thread_entry below), created via
++// tx_thread_create in tx_application_define.
++ULONG mqtt_thread_stack[MQTT_THREAD_STACK_SIZE / sizeof(ULONG)];
++// SEPARATE stack for NetX Duo's own internal MQTT client processing
++// thread, passed to nxd_mqtt_client_create(). Must NOT be the same buffer
++// as mqtt_thread_stack above - two ThreadX threads sharing one physical
++// stack corrupt each other the moment both run (this was a real bug here:
++// temperature/LED silently stopped updating because the outer thread's
++// stack frame got stomped by NetX's internal thread using the same
++// memory). app/mqtt/mqtt_client.c uses this same two-buffer pattern.
++ULONG mqtt_client_internal_stack[MQTT_THREAD_STACK_SIZE / sizeof(ULONG)];
++
++typedef enum
++{
++    WIFI_CONNECTING = 0,
++    WIFI_CONNECTED  = 1,
++    WIFI_FAILED     = 2
++} wifi_state_t;
++
++// Single word, so a plain store/load is atomic on Cortex-M4 - no mutex
++// needed between the Wi-Fi thread (writer) and the display thread (reader).
++static volatile wifi_state_t wifi_state = WIFI_CONNECTING;
++
++typedef enum
++{
++    MODE_NORMAL       = 0,
++    MODE_STUCK        = 1,
++    MODE_DROPOUT      = 2,
++    MODE_OUT_OF_RANGE = 3
++} fault_mode_t;
++
++// SPIKE (A double-click, one-shot) and click/toggle semantics were both
++// removed - the double-click detection window made every A click wait
++// ~400ms before committing, which read as the mode getting "stuck". Fault
++// modes are now purely HELD-button based (see display_thread_entry): a
++// fault is active only while the triggering button(s) are physically held
++// down, and clears the instant they're released. No ambiguity, no delay.
++
++// Persistent fault mode: toggled by display_thread_entry (the sole owner of
++// button/gesture reading), consumed by mqtt_thread_entry every 1s to
++// decide what to publish. Single word, so a plain store/load is atomic on
++// Cortex-M4 - no mutex needed.
++static volatile fault_mode_t fault_mode = MODE_NORMAL;
++
++// The battery temperature actually being sent right now (frozen during
++// MODE_STUCK/MODE_DROPOUT, matching what publish_temperature() last sent).
++// float is 32-bit/word-sized, so this is also a safe plain store/load on
++// Cortex-M4 with no mutex needed.
++static volatile float displayed_temp = 25.0f;
++
++// Written by mqtt_thread_entry (and mqtt_disconnect_func, on a
++// broker-initiated disconnect - plausible after a while against a
++// flaky/placeholder broker, so publish attempts actually stop instead of
++// repeatedly stalling on a dead connection), read by display_thread_entry
++// for the OLED's MQTT status symbol. mqtt_setup_attempted distinguishes
++// "not attempted yet / still connecting" (both 0) from "attempted and
++// failed" (connected==0, attempted==1). Single words, plain store/load is
++// atomic on Cortex-M4 - no mutex needed.
++static volatile int mqtt_connected       = 0;
++static volatile int mqtt_setup_attempted = 0;
++
++// Extra OLED rows beyond the title, all Font_7x10 (10px tall), packed
++// tighter than screen.h's L0..L3 spacing so a 5th line still fits in the
++// 64px-tall display: title 0-18, then 4 rows of 11px from y=18.
++#define ROW_WIFI    18
++#define ROW_BUTTONS 29
++#define ROW_MODE    40
++#define ROW_TEMP    51
++
++// OUT_OF_RANGE no longer jumps straight to a fixed value: starting from the
++// real sensor reading at the moment A+B are pressed, the published
++// temperature climbs by OUT_OF_RANGE_STEP_C every tick (1s) until it
++// reaches OUT_OF_RANGE_MAX_C, then holds there until the buttons are
++// released.
++#define OUT_OF_RANGE_STEP_C 20.0f
++#define OUT_OF_RANGE_MAX_C  160.0f
++
++#define LED_PWM_MAX 2047
++#define LED_PWM_OFF 0
++
++// RGB_LED_SET_R/G/B(value) come from board_init.h (already included),
++// already initialized by the shared app/common/board_init.c - nothing to
++// set up ourselves.
++static void set_fault_led(int fault_active)
++{
++    if (fault_active)
++    {
++        RGB_LED_SET_R(LED_PWM_MAX);
++        RGB_LED_SET_G(LED_PWM_OFF);
++        RGB_LED_SET_B(LED_PWM_OFF);
++    }
++    else
++    {
++        RGB_LED_SET_R(LED_PWM_OFF);
++        RGB_LED_SET_G(LED_PWM_MAX);
++        RGB_LED_SET_B(LED_PWM_OFF);
++    }
++}
++
++// app/common/stm32cubef4/stm32f4xx_hal_msp.c (compiled into every config,
++// including this one) enables the A/B button EXTI interrupts at the NVIC
++// level. app/common/board_init.c defines __weak button_a_callback()/
++// button_b_callback() that fire on every real press and independently
++// stomp the RGB LED with their own demo ramp (and toggle the WIFI/CLOUD/
++// USER LEDs) - fighting set_fault_led() above. Since those are __weak,
++// providing real (non-weak) definitions here overrides them at link time -
++// this is the repo's own intended override mechanism (see
++// app/arcade/button_handler.c, which does the same). No-op bodies fully
++// neutralize the legacy demo behavior; our own button handling is
++// poll-based (BUTTON_A_IS_PRESSED/BUTTON_B_IS_PRESSED in
++// display_thread_entry) and doesn't depend on these interrupts at all.
++void button_a_callback(void)
++{
++}
++
++void button_b_callback(void)
++{
++}
++
++static void eclipsetx_thread_entry(ULONG parameter)
++{
++    UINT status;
++
++    printf("Starting Eclipse ThreadX thread\r\n\r\n");
++
++    // Initialize the network
++    if ((status = wwd_network_init(WIFI_SSID, WIFI_PASSWORD, WIFI_MODE)) == 0)
++    {
++        status = wwd_network_connect();
++    }
++
++    if (status == 0)
++    {
++        printf("SUCCESS: WiFi connected\r\n");
++        wifi_state = WIFI_CONNECTED;
++    }
++    else
++    {
++        printf("ERROR: Failed to initialize the network (0x%08x)\r\n", status);
++        wifi_state = WIFI_FAILED;
++    }
++}
++
++// Draws the app name, the Wi-Fi/MQTT connection status, the live A/B
++// button status, the current fault mode, and the battery temperature being
++// sent, all in one screen refresh.
++//
++// NOTE: the AZ3166's onboard SSD1306 OLED is monochrome - the driver only
++// supports Black (pixel off) and White (pixel on), so red (or any other
++// color) text is not possible on this display.
++static void draw_screen(char* status_line, char* button_line, char* mode_line, char* temp_line)
++{
++    // Hold the shared I2C bus for the whole sequence - see i2c_mutex's
++    // comment for why this matters (concurrent I2C access from this thread
++    // and mqtt_thread_entry's sensor reads can wedge the bus at the
++    // hardware level).
++    tx_mutex_get(&i2c_mutex, TX_WAIT_FOREVER);
++    recover_i2c_if_stuck();
++
++    ssd1306_Fill(Black);
++    ssd1306_SetCursor(2, L0);
++    ssd1306_WriteString("FEVengers", Font_11x18, White);
++    ssd1306_SetCursor(2, ROW_WIFI);
++    ssd1306_WriteString(status_line, Font_7x10, White);
++    ssd1306_SetCursor(2, ROW_BUTTONS);
++    ssd1306_WriteString(button_line, Font_7x10, White);
++    ssd1306_SetCursor(2, ROW_MODE);
++    ssd1306_WriteString(mode_line, Font_7x10, White);
++    ssd1306_SetCursor(2, ROW_TEMP);
++    ssd1306_WriteString(temp_line, Font_7x10, White);
++    ssd1306_UpdateScreen();
++
++    tx_mutex_put(&i2c_mutex);
++}
++
++// Sole owner of button reading AND of fault_mode: polls A/B every 100ms
++// and derives fault_mode directly from which buttons are currently HELD
++// DOWN (not click/toggle gestures) - the fault is active only as long as
++// the button is held, and clears the instant it's released:
++//   A+B both held -> MODE_OUT_OF_RANGE (highest priority)
++//   B held only   -> MODE_DROPOUT
++//   A held only   -> MODE_STUCK
++//   neither held  -> MODE_NORMAL
++//
++// Deliberately its own thread, separate from display_thread_entry, and
++// touches NO I2C/no mutex at all (BUTTON_A/B_IS_PRESSED are plain GPIO
++// register reads). This was a real, reported bug: when
++// display_thread_entry's OLED write stalled for an extended stretch (see
++// i2c_mutex's comment), fault_mode used to only get recomputed once that
++// same thread's loop got back around to it - so a stuck screen also meant
++// buttons/the RGB LED responded "çok geç" (very late). Now button->
++// fault_mode->LED responsiveness is fully independent of whether the OLED
++// is currently stuck.
++static void button_thread_entry(ULONG parameter)
++{
++    for (;;)
++    {
++        int a = BUTTON_A_IS_PRESSED ? 1 : 0;
++        int b = BUTTON_B_IS_PRESSED ? 1 : 0;
++
++        fault_mode = (a && b) ? MODE_OUT_OF_RANGE
++                               : (b ? MODE_DROPOUT : (a ? MODE_STUCK : MODE_NORMAL));
++
++        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 10);
++    }
++}
++
++// Redraws the OLED on any change. Reads (never writes) fault_mode -
++// button_thread_entry is the sole writer, see its comment for why. This is
++// the only thread that touches the ssd1306 framebuffer, so there's no risk
++// of two threads racing on it; it CAN stall for extended periods inside
++// the I2C write (see i2c_mutex's comment) without that affecting buttons,
++// the RGB LED, the sensor, or MQTT anymore.
++static void display_thread_entry(ULONG parameter)
++{
++    wifi_state_t last_state  = (wifi_state_t)-1;
++    fault_mode_t last_mode   = (fault_mode_t)-1;
++    int last_a               = -1;
++    int last_b               = -1;
++    int last_mqtt_connected  = -1;
++    int last_mqtt_attempted  = -1;
++    // Compared as tenths of a degree to avoid float-equality pitfalls.
++    int last_temp_tenths = -1;
++
++    for (;;)
++    {
++        wifi_state_t state   = wifi_state;
++        int a                 = BUTTON_A_IS_PRESSED ? 1 : 0;
++        int b                 = BUTTON_B_IS_PRESSED ? 1 : 0;
++        fault_mode_t mode     = fault_mode;
++        int mqtt_is_connected = mqtt_connected;
++        int mqtt_is_attempted = mqtt_setup_attempted;
++
++        int temp_tenths = (int)(displayed_temp * 10.0f);
++
++        if (state != last_state || mode != last_mode || a != last_a || b != last_b ||
++            temp_tenths != last_temp_tenths || mqtt_is_connected != last_mqtt_connected ||
++            mqtt_is_attempted != last_mqtt_attempted)
++        {
++            last_state          = state;
++            last_mode           = mode;
++            last_a              = a;
++            last_b              = b;
++            last_temp_tenths    = temp_tenths;
++            last_mqtt_connected = mqtt_is_connected;
++            last_mqtt_attempted = mqtt_is_attempted;
++
++            char* button_line = a ? (b ? "A:DOWN B:DOWN" : "A:DOWN B:UP")
++                                   : (b ? "A:UP B:DOWN" : "A:UP B:UP");
++
++            // Only Font_7x10/Font_11x18 are compiled into this project's
++            // ssd1306 library (see lib/mxchip_bsp/ssd1306/ssd1306_conf.h,
++            // outside FEVengersApp - not touching it). At Font_7x10, 128px
++            // / 7px = 18 chars max, so the full "SENSOR DROPOUT" / "OUT OF
++            // RANGE" style labels don't fit and are shortened.
++            char* mode_line;
++            switch (mode)
++            {
++                case MODE_STUCK:
++                    mode_line = "MODE: STUCK";
++                    break;
++                case MODE_DROPOUT:
++                    mode_line = "MODE: DROPOUT";
++                    break;
++                case MODE_OUT_OF_RANGE:
++                    mode_line = "MODE: OUT OF RNG";
++                    break;
++                default:
++                    mode_line = "MODE: NORMAL";
++                    break;
++            }
++
++            char temp_line[20];
++            npf_snprintf(temp_line, sizeof(temp_line), "Temp: %.1fC", (double)displayed_temp);
++
++            // Compact "WiFi:<X/V/-> MQTT:<X/V/->" status line: 'V' =
++            // connected, 'X' = failed, '-' = still connecting/not
++            // attempted yet. Short symbols because a full "WiFi: Connected
++            // / MQTT: Connected" pair of lines doesn't fit two separate
++            // rows alongside buttons/mode/temp on a 64px-tall screen.
++            char wifi_symbol = (state == WIFI_CONNECTED) ? 'V' : (state == WIFI_FAILED) ? 'X' : '-';
++            char mqtt_symbol = mqtt_is_connected ? 'V' : (mqtt_is_attempted ? 'X' : '-');
++
++            char status_line[20];
++            npf_snprintf(status_line, sizeof(status_line), "WiFi:%c MQTT:%c", wifi_symbol, mqtt_symbol);
++
++            draw_screen(status_line, button_line, mode_line, temp_line);
++        }
++
++        // 0.5s, not 0.1s: fewer checks means fewer chances to redraw (and
++        // therefore fewer OLED I2C writes) per second - the temperature
++        // itself only changes once a second now anyway (see
++        // mqtt_thread_entry), so polling the OLED's inputs 10x/s was more
++        // than needed. Buttons/mode still show up within half a second.
++        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 2);
++    }
++}
++
++#define STRLEN(p) (sizeof(p) - 1)
++
++static NXD_MQTT_CLIENT mqtt_client;
++
++#if MQTT_BROKER_CONFIGURED
++static VOID mqtt_disconnect_func(NXD_MQTT_CLIENT* client_ptr)
++{
++    NX_PARAMETER_NOT_USED(client_ptr);
++    printf("MQTT client disconnected from broker.\r\n");
++    mqtt_connected = 0;
++}
++#endif
++
++// Single topic, single message shape: just the temperature and a rolling
++// sequence counter - no separate heartbeat topic/message anymore. Skipped
++// entirely in MODE_DROPOUT (see the call site), so "no message" is itself
++// the dropout signal; there's no longer a separate heartbeat channel to
++// tell "sensor dropped out" apart from "ECU is dead" - a deliberate
++// simplification.
++static void publish_temperature(float temperature_c, ULONG sequence)
++{
++    char buffer[64];
++    UINT status;
++    int length;
++
++    length = npf_snprintf(buffer, sizeof(buffer),
++        "{\"temperature_degC\": %.1f, \"counter\": %lu}",
++        (double)temperature_c, sequence);
++
++    // QOS0, not QOS1: with a flaky/placeholder broker, QOS1 messages that
++    // never get PUBACK'd queue up for retransmission inside the NetX MQTT
++    // client - at a fast publish cadence that queue can grow unbounded over
++    // time and was a likely contributor to the reported "freezes after a
++    // while". QOS0 is fire-and-forget, nothing to retry/accumulate, and is
++    // fine for a telemetry stream where a fresh value follows soon anyway.
++    status = nxd_mqtt_client_publish(&mqtt_client, MQTT_TELEMETRY_TOPIC, STRLEN(MQTT_TELEMETRY_TOPIC),
++        buffer, (UINT)length, 0, QOS0, MQTT_PUBLISH_TIMEOUT_TICKS);
++
++    if (status != NXD_MQTT_SUCCESS)
++    {
++        printf("ERROR: Temperature publish failed (0x%02x)\r\n", status);
++    }
++}
++
++// Reads the real battery (board) temperature every 1s and publishes it
++// over the single MQTT topic, applying whatever fault mode
++// display_thread_entry has set from the live (held) button state:
++//   MODE_NORMAL       -> publish the real sensor reading; sequence advances
++//   MODE_STUCK        -> publish the real reading frozen at the moment
++//                         STUCK was entered (captured here, the first tick
++//                         the mode is seen); sequence also freezes; both
++//                         resume live the instant A is released
++//   MODE_DROPOUT      -> no message published at all (the silence IS the
++//                         dropout signal - no separate heartbeat channel
++//                         anymore); sequence doesn't advance either
++//   MODE_OUT_OF_RANGE -> publish a synthetic ramp: starts at the real
++//                         reading when A+B were pressed and climbs 20C
++//                         per tick up to 160C, then holds, for as long as
++//                         A+B are both held; sequence advances normally
++//
++// IMPORTANT: this thread does NOT block waiting for Wi-Fi before starting
++// the sensor/LED/OLED-temperature loop - only actually publishing over
++// MQTT needs a network, so that's the only part gated on Wi-Fi being
++// ready. The MQTT client create/connect attempt happens at most once,
++// inline in the loop below, the first tick Wi-Fi is seen connected -
++// connect/publish all use bounded timeouts (not NX_WAIT_FOREVER), and a
++// connect failure never returns out of this thread, so an unreachable
++// placeholder broker can only ever cost one ~5s pause, never block the
++// sensor/LED/publish-decision logic that follows it forever.
++static void mqtt_thread_entry(ULONG parameter)
++{
++    float stuck_value        = 25.0f;
++    float ramp_value         = 25.0f;
++    float last_real_temp     = 25.0f;
++    fault_mode_t last_mode    = MODE_NORMAL;
++    // Single rolling counter for the one merged topic/message (0-255, see
++    // SEQUENCE_WRAP). Frozen (not advanced) while MODE_STUCK is
++    // active - same "frozen" signature as the temperature reading itself -
++    // and simply doesn't advance during MODE_DROPOUT since nothing is
++    // published then at all.
++    ULONG sequence   = 0;
++    int user_led_on  = 0;
++    // Diagnostic only (doesn't change behavior): detects and logs when
++    // hts221_data_read() returns the exact same value many times in a row.
++    // Real sensor noise/drift means that basically never happens on a
++    // working read; a long run of bit-for-bit identical readings is the
++    // signature of lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c
++    // (outside this folder) silently failing its I2C read - it memsets the
++    // raw buffer to 0 and then never checks hts221_temperature_raw_get()'s
++    // return status, so a failed read reports a fixed "phantom" value from
++    // the calibration curve at raw=0 instead of the real temperature.
++    float stuck_sensor_last_value = 0.0f;
++    int stuck_sensor_repeat_count  = 0;
++
++    printf("Starting MQTT thread\r\n\r\n");
++
++    for (;;)
++    {
++        // Heartbeat: toggle the board's onboard "User" LED (GPIOC, plain
++        // digital on/off - not an I2C call, no mutex needed) every 1s.
++        // Placed first in this loop and in this specific thread on
++        // purpose: this is the thread whose I2C wait is now bounded (see
++        // the i2c_mutex comment above), so it can't be dragged down by a
++        // display_thread_entry hang the way a heartbeat living in
++        // display_thread_entry itself could be. A steadily blinking User
++        // LED means this thread's loop - sensor read, fault mode, LED,
++        // MQTT - is genuinely still alive, independent of whether the
++        // OLED is currently responding.
++        user_led_on = !user_led_on;
++        if (user_led_on)
++        {
++            USER_LED_ON();
++        }
++        else
++        {
++            USER_LED_OFF();
++        }
++
++        // Try bringing up the MQTT client exactly once, as soon as Wi-Fi
++        // is ready - this does NOT block the sensor/LED/OLED loop below,
++        // which already runs from the very first tick regardless of
++        // Wi-Fi/MQTT state (it owns Wi-Fi bring-up itself in
++        // eclipsetx_thread_entry; we don't call wwd_network_init/connect
++        // again here).
++        if (!mqtt_setup_attempted && wifi_state != WIFI_CONNECTING)
++        {
++            mqtt_setup_attempted = 1;
++
++            if (wifi_state == WIFI_FAILED)
++            {
++                printf("WARNING: No Wi-Fi - MQTT publishing disabled, but buttons/OLED still work\r\n");
++            }
++#if !MQTT_BROKER_CONFIGURED
++            else
++            {
++                // See the MQTT_BROKER_CONFIGURED comment in cloud_config.h:
++                // connecting to the still-placeholder broker was observed
++                // to correlate with a full system hang. Skipped until a
++                // real broker is confirmed and this is flipped to 1.
++                printf("WARNING: MQTT_BROKER_CONFIGURED is 0 (placeholder broker) - "
++                       "skipping MQTT connect, publishing disabled, buttons/OLED still work\r\n");
++            }
++#else
++            else
++            {
++                UINT status;
++                NXD_ADDRESS server_ip;
++
++                printf("Creating MQTT client\r\n");
++                status = nxd_mqtt_client_create(&mqtt_client, MQTT_CLIENT_NAME, MQTT_CLIENT_NAME,
++                    STRLEN(MQTT_CLIENT_NAME), &nx_ip, nx_pool, (VOID*)mqtt_client_internal_stack,
++                    sizeof(mqtt_client_internal_stack), ECLIPSETX_THREAD_PRIORITY, NX_NULL, 0);
++
++                if (status)
++                {
++                    printf("ERROR: MQTT client creation failed (0x%02x) - publishing disabled\r\n", status);
++                }
++                else
++                {
++                    nxd_mqtt_client_disconnect_notify_set(&mqtt_client, mqtt_disconnect_func);
++
++                    server_ip.nxd_ip_version    = 4;
++                    server_ip.nxd_ip_address.v4 = MQTT_LOCAL_BROKER_IP;
++
++                    status = nxd_mqtt_client_connect(
++                        &mqtt_client, &server_ip, MQTT_BROKER_PORT, MQTT_KEEP_ALIVE_TIMER, 0, MQTT_CONNECT_TIMEOUT_TICKS);
++
++                    if (status != NXD_MQTT_SUCCESS)
++                    {
++                        printf("WARNING: MQTT connect failed/timed out (0x%02x) - publishing disabled, "
++                               "buttons/OLED still work (check MQTT_LOCAL_BROKER_IP in cloud_config.h)\r\n",
++                            status);
++                    }
++                    else
++                    {
++                        printf("SUCCESS: MQTT client connected\r\n");
++                        mqtt_connected = 1;
++                    }
++                }
++            }
++#endif // MQTT_BROKER_CONFIGURED
++        }
++
++        // "Her 1 saniyede sıcaklığı oku" (previously 0.5s - slowed down, see the
++        // each tick, regardless of fault mode or Wi-Fi/MQTT state, so a
++        // fresh value is ready the instant STUCK captures it or
++        // DROPOUT/OUT_OF_RANGE end, and the OLED/LED are live immediately
++        // at boot without waiting for Wi-Fi.
++        //
++        // Mutex-protected: this is an I2C transaction on the same bus/HAL
++        // handle display_thread_entry's OLED writes use - see i2c_mutex.
++        // BOUNDED wait, not TX_WAIT_FOREVER: ssd1306_WriteCommand/WriteData
++        // (lib/mxchip_bsp/ssd1306/ssd1306.c, outside this folder) call
++        // HAL_I2C_Mem_Write with HAL_MAX_DELAY (no timeout) - if that ever
++        // truly hangs inside display_thread_entry's critical section, it
++        // holds i2c_mutex forever. Waiting forever here too would drag MQTT
++        // publishing, the sensor read, and the LED down with it the moment
++        // that happens (observed: a run where the screen AND MQTT both
++        // stopped together). With a bounded wait, if the mutex can't be
++        // acquired this tick, we just reuse the last known reading and keep
++        // publishing/the LED alive - degraded (stale temperature) but not
++        // fully frozen.
++        if (tx_mutex_get(&i2c_mutex, TX_TIMER_TICKS_PER_SECOND / 2) == TX_SUCCESS)
++        {
++            recover_i2c_if_stuck();
++            last_real_temp = hts221_data_read().temperature_degC;
++            tx_mutex_put(&i2c_mutex);
++        }
++        else
++        {
++            // Plain printf's "%f" is unreliable in this project (newlib-nano
++            // is linked without float-in-printf support; only npf_snprintf,
++            // nanoprintf's own formatter, reliably handles floats here - the
++            // same reason publish_temperature() builds
++            // into a buffer with npf_snprintf instead of calling printf
++            // directly). Build the message with npf_snprintf first.
++            char warn_buf[96];
++            npf_snprintf(warn_buf, sizeof(warn_buf),
++                "WARNING: Could not get i2c_mutex for sensor read within 0.5s "
++                "- reusing last reading (%.1fC)",
++                (double)last_real_temp);
++            printf("%s\r\n", warn_buf);
++        }
++        float real_temp = last_real_temp;
++
++        // Diagnostic: flag a suspiciously long run of bit-identical sensor
++        // readings - see the comment on stuck_sensor_last_value above.
++        if (real_temp == stuck_sensor_last_value)
++        {
++            stuck_sensor_repeat_count++;
++            // First flagged at ~2s unchanged, then a reminder every ~5s so
++            // it doesn't spam the log but stays visible for as long as it
++            // continues.
++            if (stuck_sensor_repeat_count == 4 || stuck_sensor_repeat_count % 10 == 0)
++            {
++                // See the npf_snprintf note above - plain printf's "%f" is
++                // unreliable here.
++                char warn_buf[160];
++                npf_snprintf(warn_buf, sizeof(warn_buf),
++                    "WARNING: hts221_data_read() returned the exact same value "
++                    "(%.1fC) %d times in a row - likely a silent I2C read failure "
++                    "in hts221_read_data_polling.c (outside FEVengersApp), not a "
++                    "real stable temperature. HAL_I2C_GetState=%d. Attempting a full "
++                    "I2C bus recovery.",
++                    (double)real_temp, stuck_sensor_repeat_count, (int)HAL_I2C_GetState(&I2cHandle));
++                printf("%s\r\n", warn_buf);
++
++                // This is a stronger, evidence-based trigger than
++                // recover_i2c_if_stuck()'s HAL_I2C_GetState() check above -
++                // a physically stuck slave (the likely cause of a long run
++                // of identical readings) doesn't necessarily show up as a
++                // non-READY master state, so that check alone can miss it.
++                if (tx_mutex_get(&i2c_mutex, TX_TIMER_TICKS_PER_SECOND / 2) == TX_SUCCESS)
++                {
++                    i2c_bus_recover();
++                    tx_mutex_put(&i2c_mutex);
++                }
++            }
++        }
++        else
++        {
++            stuck_sensor_last_value  = real_temp;
++            stuck_sensor_repeat_count = 0;
++        }
++
++        fault_mode_t mode = fault_mode;
++
++        // Capture the frozen value on the tick STUCK mode is newly entered.
++        if (mode == MODE_STUCK && last_mode != MODE_STUCK)
++        {
++            stuck_value = real_temp;
++        }
++
++        // OUT_OF_RANGE ramp: restart from the real reading on the tick the
++        // mode is newly entered, then climb one step per tick up to the cap.
++        if (mode == MODE_OUT_OF_RANGE)
++        {
++            if (last_mode != MODE_OUT_OF_RANGE)
++            {
++                ramp_value = real_temp;
++            }
++            ramp_value += OUT_OF_RANGE_STEP_C;
++            if (ramp_value > OUT_OF_RANGE_MAX_C)
++            {
++                ramp_value = OUT_OF_RANGE_MAX_C;
++            }
++        }
++        last_mode = mode;
++
++        int fault_active = (mode != MODE_NORMAL);
++        set_fault_led(fault_active);
++
++        if (mode == MODE_DROPOUT)
++        {
++            // No message published at all - this silence (on the single
++            // topic) IS the dropout signal now that there's no separate
++            // heartbeat channel. displayed_temp intentionally stays at
++            // whatever it last was. sequence intentionally does NOT
++            // advance either - it's not being used right now.
++        }
++        else
++        {
++            float published_temp;
++            switch (mode)
++            {
++                case MODE_STUCK:
++                    published_temp = stuck_value;
++                    break;
++                case MODE_OUT_OF_RANGE:
++                    published_temp = ramp_value;
++                    break;
++                default: // MODE_NORMAL
++                    published_temp = real_temp;
++                    break;
++            }
++
++            displayed_temp = published_temp;
++
++            if (mqtt_connected)
++            {
++                publish_temperature(published_temp, sequence);
++            }
++
++            // Rolling counter: frozen (not advanced) while MODE_STUCK is
++            // active - same "frozen" signature as the temperature value
++            // itself - resumes counting the instant STUCK ends. Wraps
++            // 0-255 instead of growing forever (SEQUENCE_WRAP).
++            if (mode != MODE_STUCK)
++            {
++                sequence = (sequence + 1) % SEQUENCE_WRAP;
++            }
++        }
++
++        // 1s, not 0.5s: halves I2C bus traffic (sensor read + 1-2 MQTT
++        // publishes per tick), on the theory that less-frequent I2C
++        // transactions give whatever causes the occasional bus lockup
++        // fewer chances to trigger. A mitigation, not a fix by itself -
++        // i2c_bus_recover() above is the real fix once a lockup is
++        // detected.
++        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
++    }
++}
++
++void tx_application_define(void* first_unused_memory)
++{
++    systick_interval_set(TX_TIMER_TICKS_PER_SECOND);
++
++    if (tx_mutex_create(&i2c_mutex, "I2C Mutex", TX_NO_INHERIT) != TX_SUCCESS)
++    {
++        printf("ERROR: I2C mutex creation failed\r\n");
++    }
++
++    // Create ThreadX thread
++    UINT status = tx_thread_create(&eclipsetx_thread,
++        "Eclipse ThreadX Thread",
++        eclipsetx_thread_entry,
++        0,
++        eclipsetx_thread_stack,
++        ECLIPSETX_THREAD_STACK_SIZE,
++        ECLIPSETX_THREAD_PRIORITY,
++        ECLIPSETX_THREAD_PRIORITY,
++        TX_NO_TIME_SLICE,
++        TX_AUTO_START);
++
++    if (status != TX_SUCCESS)
++    {
++        printf("ERROR: Eclipse ThreadX thread creation failed\r\n");
++    }
++
++    // Create the display/button-polling thread
++    UINT status2 = tx_thread_create(&eclipsetx_thread2,
++        "Display Thread",
++        display_thread_entry,
++        0,
++        eclipsetx_thread_stack2,
++        ECLIPSETX_THREAD_STACK_SIZE,
++        ECLIPSETX_THREAD_PRIORITY,
++        ECLIPSETX_THREAD_PRIORITY,
++        TX_NO_TIME_SLICE,
++        TX_AUTO_START);
++
++    if (status2 != TX_SUCCESS)
++    {
++        printf("ERROR: Display thread creation failed\r\n");
++    }
++
++    // Create the MQTT publishing thread
++    UINT status3 = tx_thread_create(&mqtt_thread,
++        "MQTT Thread",
++        mqtt_thread_entry,
++        0,
++        mqtt_thread_stack,
++        MQTT_THREAD_STACK_SIZE,
++        ECLIPSETX_THREAD_PRIORITY,
++        ECLIPSETX_THREAD_PRIORITY,
++        TX_NO_TIME_SLICE,
++        TX_AUTO_START);
++
++    if (status3 != TX_SUCCESS)
++    {
++        printf("ERROR: MQTT thread creation failed\r\n");
++    }
++
++    // Create the button-polling thread (see button_thread_entry - kept
++    // separate from the OLED-drawing thread so a stuck screen can't delay
++    // button/LED responsiveness).
++    UINT status4 = tx_thread_create(&button_thread,
++        "Button Thread",
++        button_thread_entry,
++        0,
++        button_thread_stack,
++        ECLIPSETX_THREAD_STACK_SIZE,
++        ECLIPSETX_THREAD_PRIORITY,
++        ECLIPSETX_THREAD_PRIORITY,
++        TX_NO_TIME_SLICE,
++        TX_AUTO_START);
++
++    if (status4 != TX_SUCCESS)
++    {
++        printf("ERROR: Button thread creation failed\r\n");
++    }
++}
++
++int main(void)
++{
++    // Initialize the board
++    board_init();
++
++    // Enter the ThreadX kernel
++    tx_kernel_enter();
++
++    return 0;
++}
+diff --git a/MXChip/AZ3166/lib/mxchip_bsp/ssd1306/ssd1306.c b/MXChip/AZ3166/lib/mxchip_bsp/ssd1306/ssd1306.c
+index 67d97c2..63f69d5 100644
+--- a/MXChip/AZ3166/lib/mxchip_bsp/ssd1306/ssd1306.c
++++ b/MXChip/AZ3166/lib/mxchip_bsp/ssd1306/ssd1306.c
+@@ -9,14 +9,20 @@ void ssd1306_Reset(void) {
+     /* for I2C - do nothing */
+ }
+ 
++// Bounded, not HAL_MAX_DELAY (unbounded): a transient I2C glitch used to be
++// able to hang these calls forever, freezing whichever thread/critical
++// section called them (and, if called while holding a shared mutex,
++// anything else waiting on it too).
++#define SSD1306_I2C_TIMEOUT_MS 100
++
+ // Send a byte to the command register
+ void ssd1306_WriteCommand(uint8_t byte) {
+-    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1, HAL_MAX_DELAY);
++    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x00, 1, &byte, 1, SSD1306_I2C_TIMEOUT_MS);
+ }
+ 
+ // Send data
+ void ssd1306_WriteData(uint8_t* buffer, size_t buff_size) {
+-    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size, HAL_MAX_DELAY);
++    HAL_I2C_Mem_Write(&SSD1306_I2C_PORT, SSD1306_I2C_ADDR, 0x40, 1, buffer, buff_size, SSD1306_I2C_TIMEOUT_MS);
+ }
+ 
+ #elif defined(SSD1306_USE_SPI)
+diff --git a/MXChip/AZ3166/lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c b/MXChip/AZ3166/lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c
+index fde23c8..a4990be 100644
+--- a/MXChip/AZ3166/lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c
++++ b/MXChip/AZ3166/lib/mxchip_bsp/stm_sensor/Src/hts221_read_data_polling.c
+@@ -153,35 +153,61 @@ Sensor_StatusTypeDef hts221_config(void)
+   return ret;
+ }
+ 
+-static uint32_t timeout = 5;
++/* Last known-good reading. Returned as-is whenever a raw I2C read fails,
++ * instead of silently computing a result from a zeroed buffer (see below) -
++ * fixes hts221_data_read() going "stuck" on a fixed, noise-free value
++ * forever after one transient I2C failure. */
++static hts221_data_t last_good_reading = {0};
++
+ hts221_data_t hts221_data_read(void)
+ {
+-  hts221_data_t reading = {0};
++  hts221_data_t reading = last_good_reading;
++  int32_t humidity_status;
++  int32_t temperature_status;
+ 
+   /* Read samples in polling mode */
+ 
+-    /* Read output only if new value is available */
+-    hts221_reg_t reg;
+-    
+-    /* Read output only if new value is available */
++    /* Read output only if new value is available. `timeout` is local (reset
++     * every call) - it used to be `static uint32_t timeout = 5`, shared
++     * across every call for the whole program's lifetime, so after the
++     * first ~5 "not ready yet" waits anywhere in the program this
++     * readiness check silently turned into a permanent no-op. */
++    hts221_reg_t reg = {0};
++    uint32_t timeout = 5;
++
+     while((reg.status_reg.h_da!=1) && (reg.status_reg.t_da!=1) && (timeout>0))
+     {
+       hts221_status_get(&dev_ctx, &reg.status_reg);
+       timeout--;
+     }
+ 
+-    /* Read humidity data */
++    /* Read humidity data. hts221_humidity_raw_get()/hts221_temperature_raw_get()
++     * return an I2C error status that used to be ignored entirely - a
++     * transient I2C failure would leave data_raw_humidity/temperature at
++     * the memset-to-zero value below, which linear_interpolation() would
++     * still turn into a fixed, deterministic "phantom" reading (the
++     * calibration curve's value at raw=0), masquerading as a real,
++     * repeatable sensor value. Now a failed read keeps last_good_reading
++     * instead. */
+     memset(data_raw_humidity.u8bit, 0x00, sizeof(int16_t));
+-    hts221_humidity_raw_get(&dev_ctx, data_raw_humidity.u8bit);
+-    reading.humidity_perc = linear_interpolation(&lin_hum, data_raw_humidity.i16bit);
+-    if (reading.humidity_perc < 0) reading.humidity_perc = 0;
+-    if (reading.humidity_perc > 100) reading.humidity_perc = 100;
++    humidity_status = hts221_humidity_raw_get(&dev_ctx, data_raw_humidity.u8bit);
++    if (humidity_status == 0)
++    {
++        reading.humidity_perc = linear_interpolation(&lin_hum, data_raw_humidity.i16bit);
++        if (reading.humidity_perc < 0) reading.humidity_perc = 0;
++        if (reading.humidity_perc > 100) reading.humidity_perc = 100;
++    }
+ 
+     /* Read temperature data */
+     memset(data_raw_temperature.u8bit, 0x00, sizeof(int16_t));
+-    hts221_temperature_raw_get(&dev_ctx, data_raw_temperature.u8bit);
+-    reading.temperature_degC = linear_interpolation(&lin_temp, data_raw_temperature.i16bit);
+-    
++    temperature_status = hts221_temperature_raw_get(&dev_ctx, data_raw_temperature.u8bit);
++    if (temperature_status == 0)
++    {
++        reading.temperature_degC = linear_interpolation(&lin_temp, data_raw_temperature.i16bit);
++    }
++
++    last_good_reading = reading;
++
+   return reading;
+ }
+ 
