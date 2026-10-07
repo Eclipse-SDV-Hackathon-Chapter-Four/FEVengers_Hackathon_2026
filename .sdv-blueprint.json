@@ -9,6 +9,7 @@
     { "id": "iot.zenoh" },
     { "id": "iot.mosquitto" },
     { "id": "technology.iceoryx" },
-    { "id": "iot.threadx" }
+    { "id": "iot.threadx" },
+    { "id": "automotive.autosd" }
   ]
 }
