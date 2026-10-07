@@ -1,0 +1,13 @@
+# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
+#
+# Evidence collector: links injected fault, Guardian events and diagnostics into a verdict.
+# SKELETON: builds and runs, but does nothing yet.
+
+[package]
+name = "evidence-collector"
+version = "0.1.0"
+edition = "2021"
+description = "Evidence collector: links injected fault, Guardian events and diagnostics into a verdict. (skeleton)"
+license = "EPL-2.0"
+
+[dependencies]

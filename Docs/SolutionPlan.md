@@ -4,71 +4,61 @@
 
 ### FEVengers Assemble!
 
-The Roster:
+Our roster comprises software developers from FEV.io and FEV Turkey:
 
 | Name | Git Handle | Experience | Responsibility |
 | ---- | -------- | -------- | -------- |
-| Ashwin Prakash Kadayil | Kadayil | X Years Automotive |  |
-| Michael Luxen | FEVLuM | uProtocol | Open SOVD |
-| Sinan Cidem | CidemSinan | AutoSD | Connection AZ3166 - Host PC |
-| Irem Isik Erol  | isik-i  | X Years Automotive | Open SOVD |
-| Alexander Mödder | MoedderAlex | X Years Automotive | CodeReviews / Presentation / Support |
+| Ashwin Prakash Kadayil | Kadayil | Embedded Systems, HPC, Software Architecture | Hacking |
+| Michael Luxen | FEVLuM | In-Vehicle Networks, Diagnostics, Embedded Software | Hacking |
+| Sinan Cidem | CidemSinan | Software Developer, Embedded Engineering, Ankaios, AUTOSAR | Hacking |
+| Irem Isik Erol  | isik-i  | VCU Integration, AUTOSAR, DevOps | Hacking |
+| Alexander Mödder | MoedderAlex | Simulation, Network Communication, DevOps | Project Management |
 
 ### The Villain of the day:
 
-Doctor Whodunnit!
+**Doctor Whodunnit!**
 
-With our experience in benchmarking and testing, we are well equipped to take down this challenge.
+### Our Attack Plan
 
-### Our attack plan
+We began with a brainstorming session to outline the overall architecture, which served as a foundation for further development. This approach allowed us to quickly identify missing APIs and dependencies, enabling us to parallelize exploration tasks across the team.
 
-We started with a brainstorming session to draw a rough outline of the Architecture.
-This gave us a springboard to explore missing necessary API's and let us distribute parralel exploration tasks quickly.
+The resulting architecture is as follows:
 
-From that we 
+![View screenshot](./Static_View.png)
 
 ## How do we work?
 
 ### The Development Process
 
-Tracking - Our Tasks are tracked via Issues
+**Task Tracking**
+- **Issues**: We track all tasks and work items through GitHub .
 
-Branching strategy: 
-Main Branch - Prouction ready code, with releases. Pushing to this branch is only possible via PR
-Integration Branch - Work flows together here, merge coflicts are resolved etc. Pushing to this branch is only possible via PR
+**Branching Strategy**
+- **Main Branch**: Contains production-ready code and releases. All pushes require a pull request.
+- **Integration Branch**: Central branch where work flows together and merge conflicts are resolved. All pushes require a pull request.
+- **User Branches**: Each team member maintains their own branch for continuous work on their assigned tasks and features.
 
 
 ## Quality Assurance
 
-Code reviews whenever a branch is merged into integration
-Unit tests?
+**Code Reviews**
+- **During Pull Requests**: All branches merged into the integration branch require a code review.
+
+**Testing**
+- **Unit tests**: We plan to get coverage for as many components as we can.
+
+**Documentation**
+- **Shared**: Each team member is responsible for documenting their own work when creating new features or updating existing functionality.
+- **Up-to-date**: This ensures documentation remains current and accurate throughout development.
 
 ## Communication
 
-Excalidraw
-Slack
-Whatsapp
-Github
+- **Excalidraw**: Initial architecture brainstorming and design discussions
+- **Slack**: Real-time communication while working on development tasks
+- **WhatsApp**: Coordination outside of the workplace
+- **GitHub**: Code collaboration, pull request discussions, and issue tracking
 
 ## Decision making
 
-All decisions are made py popular vote, as we are a team of 5 this cannot tie.
+- **Popular vote**: We cannot tie with 5 people
 
-
-1. Your Team at a Glance
-● Identity: Who are you? Provide a brief, catchy tagline or team name.
-● Roster: List all team members along with their respective GitHub Handles.
-● Responsibilities: Define clear roles within the team (if dedicated roles have
-been assigned).
-● Challenge Alignment: Clearly declare the specific challenge you have
-decided to compete for.
-● Core Idea: Outline a summary of your rough solution idea.
-1. How Do You Work?
-● Development process Light Explain your framework for project planning
-and progress tracking.
-● Detail how you intend to ensure proper quality control (e.g., testing
-strategies, document management, code reviews).
-● Team communication: Detail how the team will communicate effectively
-under time-sensitive constraints.
-● Decision making: Outline your strategy for handling internal bottlenecks or
-resolving design disagreements
