@@ -66,9 +66,3 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
-
-# Rust
-target/
-
-# Image archives written by deploy/build-images.sh
-/build/images/
