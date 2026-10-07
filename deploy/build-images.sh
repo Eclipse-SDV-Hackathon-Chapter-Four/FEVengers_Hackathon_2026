@@ -29,6 +29,7 @@ vss-uprotocol-publisher|vss-uprotocol-publisher
 battery-thermal-guardian|battery-thermal-guardian
 dfm|dfm-container
 sovd-fault-bridge|sovd/sovd-fault-bridge
+opensovd-gateway-dfm|opensovd-gateway-dfm
 fault-campaign-runner|fault-campaign-runner
 evidence-collector|evidence-collector
 "
