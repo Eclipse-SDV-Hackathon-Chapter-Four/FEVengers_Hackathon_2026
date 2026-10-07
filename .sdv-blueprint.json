@@ -8,6 +8,7 @@
     { "id": "automotive.opensovd" },
     { "id": "iot.zenoh" },
     { "id": "iot.mosquitto" },
-    { "id": "technology.iceoryx" }
+    { "id": "technology.iceoryx" },
+    { "id": "iot.threadx" }
   ]
 }
