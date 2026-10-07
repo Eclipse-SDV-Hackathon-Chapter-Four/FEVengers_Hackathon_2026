@@ -1,0 +1,235 @@
+<!doctype html>
+<!-- Created with AI assistance (Claude Opus 5.5, Anthropic). -->
+<!-- Fault monitor for the OpenSOVD gateway: reads /sovd/v1/{apps|components}/{id}/faults. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guardian Fault Monitor</title>
+<style>
+  /* Layout: header with entity + controls, summary counts, one fault table. No external resources (works offline in AutoSD). */
+  :root {
+    --bg: #f4f6f5; --panel: #ffffff; --fg: #17201b; --muted: #5d6b63; --line: #d6ddd9;
+    --accent: #1f6f5c;
+    --bad: #b3261e; --bad-bg: #fbe6e4;
+    --warn: #8a5a00; --warn-bg: #fbf0d9;
+    --ok: #2e6b3a; --ok-bg: #e3f2e6;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111614; --panel: #18201c; --fg: #e3ebe6; --muted: #98a8a0; --line: #2b3631;
+      --accent: #6fc3a8;
+      --bad: #ff8a80; --bad-bg: #3a1d1b;
+      --warn: #f2c46b; --warn-bg: #352a14;
+      --ok: #8fd19e; --ok-bg: #1b3022;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+  .wrap { max-width: 1200px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 40px; display: grid; gap: 18px; }
+  header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+  h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: .9rem; }
+  .sub code { font-family: var(--mono); font-size: .85em; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input, select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+  input { width: 11rem; font-family: var(--mono); font-size: .9rem; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 9rem; }
+  .stat .n { font-size: 1.6rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; }
+  .stat.bad .n { color: var(--bad); }
+  .stat.warn .n { color: var(--warn); }
+  .tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.code { font-family: var(--mono); font-size: .88rem; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .name { font-weight: 600; }
+  .sym { color: var(--muted); font-size: .85rem; }
+  .chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: .78rem; font-weight: 650; letter-spacing: .03em; }
+  .chip.active { color: var(--bad); background: var(--bad-bg); }
+  .chip.past { color: var(--warn); background: var(--warn-bg); }
+  .chip.ok { color: var(--ok); background: var(--ok-bg); }
+  .mask { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+  .time { font-family: var(--mono); font-size: .8rem; white-space: nowrap; }
+  .foot { color: var(--muted); font-size: .85rem; display: flex; flex-wrap: wrap; gap: 16px; }
+  .err { color: var(--bad); }
+  .empty { padding: 24px 12px; color: var(--muted); }
+  td button { padding: 3px 8px; font-size: .8rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Guardian Fault Monitor</h1>
+      <p class="sub">OpenSOVD fault memory via <code id="endpoint">…</code></p>
+    </div>
+    <div class="controls">
+      <label for="coll" class="sub">Entity</label>
+      <select id="coll" aria-label="Entity collection">
+        <option value="apps">apps</option>
+        <option value="components">components</option>
+      </select>
+      <input id="entity" value="battery" aria-label="Entity id" spellcheck="false">
+      <select id="filter" aria-label="Show">
+        <option value="all">All faults</option>
+        <option value="active">Active only</option>
+        <option value="history">Active or occurred</option>
+      </select>
+      <button id="pause" type="button">Pause</button>
+      <button id="clearAll" type="button" class="danger">Clear all</button>
+    </div>
+  </header>
+
+  <section class="summary" aria-label="Summary">
+    <div class="stat bad"><div class="n" id="nActive">–</div><div class="l">Active now</div></div>
+    <div class="stat warn"><div class="n" id="nPast">–</div><div class="l">Occurred, cleared</div></div>
+    <div class="stat"><div class="n" id="nOk">–</div><div class="l">Never failed</div></div>
+    <div class="stat"><div class="n" id="nTotal">–</div><div class="l">Faults in catalog</div></div>
+  </section>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>State</th><th>Fault</th><th>Code</th><th>Sev.</th>
+          <th>Count</th><th>First</th><th>Last</th><th>Mask</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="9" class="empty">Loading faults…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="foot">
+    <span id="updated">–</span>
+    <span id="error" class="err" role="status"></span>
+  </div>
+</div>
+
+<script>
+  // Base of the SOVD API. Same origin as this page (served by the gateway via --serve-dir).
+  const API = "/sovd/v1";
+  const REFRESH_MS = 1000;
+
+  const $ = (id) => document.getElementById(id);
+  let paused = false;
+
+  // Read entity from URL (?app=battery or ?component=hpc), else defaults.
+  const params = new URLSearchParams(location.search);
+  if (params.get("component")) { $("coll").value = "components"; $("entity").value = params.get("component"); }
+  if (params.get("app")) { $("coll").value = "apps"; $("entity").value = params.get("app"); }
+
+  const faultsUrl = () =>
+    `${API}/${$("coll").value}/${encodeURIComponent($("entity").value.trim())}/faults`;
+
+  // Status keys: camelCase from the gateway, snake_case from the standalone bridge.
+  const flag = (s, camel, snake) => Boolean(s[camel] ?? s[snake]);
+
+  function classify(f) {
+    const s = f.status || {};
+    if (flag(s, "testFailed", "test_failed")) return "active";
+    if (flag(s, "testFailedSinceLastClear", "test_failed_since_last_clear")) return "past";
+    return "ok";
+  }
+  const LABEL = { active: "ACTIVE", past: "OCCURRED", ok: "OK" };
+
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const time = (t) => (t ? esc(t.replace("T", " ").replace("Z", "")) : "–");
+
+  function render(items) {
+    const order = { active: 0, past: 1, ok: 2 };
+    const rows = items
+      .map((f) => ({ f, c: classify(f) }))
+      .sort((a, b) => order[a.c] - order[b.c] || a.f.code.localeCompare(b.f.code));
+
+    $("nActive").textContent = rows.filter((r) => r.c === "active").length;
+    $("nPast").textContent = rows.filter((r) => r.c === "past").length;
+    $("nOk").textContent = rows.filter((r) => r.c === "ok").length;
+    $("nTotal").textContent = rows.length;
+
+    const show = $("filter").value;
+    const visible = rows.filter((r) =>
+      show === "all" ? true : show === "active" ? r.c === "active" : r.c !== "ok");
+
+    $("rows").innerHTML = visible.length
+      ? visible.map(({ f, c }) => `
+        <tr>
+          <td><span class="chip ${c}">${LABEL[c]}</span></td>
+          <td><div class="name">${esc(f.fault_name)}</div>${f.symptom ? `<div class="sym">${esc(f.symptom)}</div>` : ""}</td>
+          <td class="code">${esc(f.code)}</td>
+          <td class="num">${esc(f.severity)}</td>
+          <td class="num">${esc(f.occurrence_counter ?? 0)}</td>
+          <td class="time">${time(f.first_occurrence)}</td>
+          <td class="time">${time(f.last_occurrence)}</td>
+          <td class="mask">${esc((f.status || {}).mask ?? "")}</td>
+          <td><button type="button" data-clear="${esc(f.code)}">Clear</button></td>
+        </tr>`).join("")
+      : `<tr><td colspan="9" class="empty">${rows.length ? "No faults match this filter." : "No faults reported for this entity."}</td></tr>`;
+  }
+
+  async function refresh() {
+    const url = faultsUrl();
+    $("endpoint").textContent = url;
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message || `HTTP ${res.status}`);
+      render(body.items || []);
+      $("error").textContent = "";
+      $("updated").textContent = `Updated ${new Date().toLocaleTimeString()} · refresh every ${REFRESH_MS / 1000} s`;
+    } catch (e) {
+      $("error").textContent = `Cannot read faults: ${e.message}. Check that the gateway and DFM are running.`;
+    }
+  }
+
+  async function clear(code) {
+    const url = code ? `${faultsUrl()}/${encodeURIComponent(code)}` : faultsUrl();
+    try {
+      const res = await fetch(url, { method: "DELETE" });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      $("error").textContent = "";
+    } catch (e) {
+      $("error").textContent = `Clear failed: ${e.message}`;
+    }
+    refresh();
+  }
+
+  // "Clear all" asks for a second click instead of a browser dialog.
+  let armed = false;
+  $("clearAll").addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      $("clearAll").textContent = "Click again to clear all";
+      setTimeout(() => { armed = false; $("clearAll").textContent = "Clear all"; }, 3000);
+      return;
+    }
+    armed = false;
+    $("clearAll").textContent = "Clear all";
+    clear(null);
+  });
+  $("rows").addEventListener("click", (e) => {
+    const code = e.target.getAttribute("data-clear");
+    if (code) clear(code);
+  });
+  $("pause").addEventListener("click", () => {
+    paused = !paused;
+    $("pause").textContent = paused ? "Resume" : "Pause";
+  });
+  ["coll", "entity", "filter"].forEach((id) => $(id).addEventListener("change", refresh));
+
+  refresh();
+  setInterval(() => { if (!paused) refresh(); }, REFRESH_MS);
+</script>
+</body>
+</html>
