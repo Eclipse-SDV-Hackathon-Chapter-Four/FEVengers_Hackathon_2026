@@ -19,7 +19,7 @@
 #
 # A new machine needs nothing prepared: the first start does the setup by
 # itself. Missing programs (QEMU, OVMF, ...) are installed by
-# deploy/install-host-deps.sh (apt, dnf or pacman; sudo may ask for your
+# deploy/install-host-deps.sh (apt or dnf; sudo may ask for your
 # password), and the image
 #   eclipse-autosd-bootc-qemu-x86_64.qcow2
 # is downloaded into this folder, next to this script (424 MB, 3.6 GB
@@ -186,11 +186,11 @@ host_ip() {
 }
 
 # UEFI firmware; the distributions disagree on folder and file names
-# (Debian/Ubuntu, Fedora, Arch).
+# (Debian/Ubuntu, Fedora).
 find_ovmf() {
   local d pair
-  for d in /usr/share/OVMF /usr/share/edk2/ovmf /usr/share/edk2/x64; do
-    for pair in OVMF_CODE_4M.fd:OVMF_VARS_4M.fd OVMF_CODE.4m.fd:OVMF_VARS.4m.fd OVMF_CODE.fd:OVMF_VARS.fd; do
+  for d in /usr/share/OVMF /usr/share/edk2/ovmf; do
+    for pair in OVMF_CODE_4M.fd:OVMF_VARS_4M.fd OVMF_CODE.fd:OVMF_VARS.fd; do
       if [[ -f "$d/${pair%%:*}" && -f "$d/${pair##*:}" ]]; then
         OVMF_CODE="$d/${pair%%:*}"; OVMF_VARS_TEMPLATE="$d/${pair##*:}"; return 0
       fi
@@ -233,7 +233,8 @@ fetch_image() {
     # A finished download whose rename was interrupted is not fetched again.
     if [[ -z "$IMAGE_SHA256" ]] || ! sha_ok "$part"; then
       log "downloading the AutoSD image (424 MB) from $IMAGE_URL"
-      curl --fail --location --continue-at - --progress-bar --output "$part" "$IMAGE_URL" \
+      curl --fail --location --continue-at - --progress-bar --retry 5 --retry-delay 3 --connect-timeout 20 \
+        --output "$part" "$IMAGE_URL" \
         || fail "download failed; run again, it continues where it stopped"
     fi
     if ! sha_ok "$part"; then

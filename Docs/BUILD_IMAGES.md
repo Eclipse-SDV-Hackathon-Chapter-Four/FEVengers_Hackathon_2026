@@ -29,7 +29,7 @@ All services are compiled inside containers, so the host needs no Rust toolchain
 | Situation | What the script does |
 |---|---|
 | Podman or Docker already works | Nothing; reports it and runs a test container |
-| Neither is usable | Installs Podman with `apt`, `dnf`, `pacman` or `brew` (asks for the sudo password) |
+| Neither is usable | Installs Podman with `apt`, `dnf` or `brew` (asks for the sudo password) |
 | Other system | Stops and says what to install by hand |
 
 `./deploy/install-build-deps.sh --check` only reports, without installing anything.
@@ -219,7 +219,8 @@ With `--no-persist` the workloads exist only in the Ankaios server's memory: aft
 | `build-images.sh` with Podman 3.4.4 on Ubuntu 22.04 (x86_64) | All images built and saved; each started once with `--help` (skeletons: plain run). Default set with everything cached: 25 s. An optional service by name builds; a removed one is refused |
 | First full build, empty cache | About 18 minutes for the four real services |
 | `install-build-deps.sh`, engine already present | Run: detects Podman and changes nothing |
-| `install-build-deps.sh`, install paths (apt / dnf / pacman / brew) | Not tested |
+| `install-build-deps.sh`, install with apt | Run in a clean, privileged Ubuntu 22.04 container: Podman 3.4.4 installed, test run ok |
+| `install-build-deps.sh`, install with dnf or brew | Not tested |
 | `build-images.sh` with Docker, or on an ARM host | Not tested |
 | `setup-autosd.sh --check`, `deploy-to-autosd.sh status` | Run against the QEMU image |
 | `setup-autosd.sh`, install path | Run by `setup-all.sh` against a freshly downloaded, untouched image: Ankaios 1.0.4 installed, agent `agent_A` connected |

@@ -46,7 +46,10 @@ done
 
 autosd_up() { target true 2>/dev/null; }
 
-step() { printf '\n'; log "step $1 of 6: $2"; }
+STEP=""
+step() { STEP="$1 ($2)"; printf '\n'; log "step $1 of 6: $2"; }
+# A failed step ends the run; what is done stays done.
+trap '[[ -z "$STEP" ]] || fail "step $STEP failed, see its messages above. Run $0 again once that is solved: finished steps are skipped"' ERR
 
 if [[ "$CHECK" == 1 ]]; then
   bad=0

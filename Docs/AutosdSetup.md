@@ -84,7 +84,7 @@ Versions are the ones this was tested with (Ubuntu 22.04, x86_64). Only OpenSSH 
 
 | | |
 |---|---|
-| Package managers | `apt` (Ubuntu, Debian), `dnf` (Fedora), `pacman` (Arch); the package names for each are at the top of the script |
+| Package managers | `apt` (Ubuntu, Debian) and `dnf` (Fedora); the package names for each are at the top of the script. The team works on Ubuntu |
 | sudo | Asked only when something is missing |
 | KVM | If `/dev/kvm` exists but you may not use it, the script adds you to the group `kvm`; log out and in again afterwards |
 | Other system | The script stops and names the missing programs; install them by hand, then `--check` |
@@ -172,9 +172,11 @@ Details: [BUILD_IMAGES.md](BUILD_IMAGES.md).
 | `setup`: download of the image into an empty folder, checksum, unpack | Run: 424 MB downloaded, checksum ok, identical to the team's copy |
 | `setup` with the image already there | Run: changes nothing |
 | `install-host-deps.sh --check`, and a run with nothing missing | Run on Ubuntu 22.04: reports all groups complete, installs nothing, asks no password |
-| `install-host-deps.sh`, install with apt | Run in a clean Ubuntu 22.04 container: installs the groups run and tools, `--check` then reports run complete, `autosd.sh check` passes (QEMU 6.2.0). The Podman test run of `install-build-deps.sh` fails there, a container inside a container |
-| `install-host-deps.sh`, install with dnf and pacman | Not tested |
-| `setup-all.sh` with `install-host-deps.sh` as step 1 | Only `--check` run; the full run above was made with the package install still inside `autosd.sh setup` |
-| `install-host-deps.sh`, adding the user to the group `kvm` | Not tested |
-| `deploy/setup-all.sh` against a freshly downloaded, untouched image (second AutoSD on other ports, own `RUN_DIR`) | Run: boots it, installs Ankaios, builds (cached), loads five images, six workloads `Running(Ok)`, SOVD and both web pages answer; 77 s. Run again: nothing loaded or restarted, 2 s |
+| `install-host-deps.sh`, install with apt | Run in clean Ubuntu 22.04 and 24.04 containers: installs the groups run and tools, `--check` then reports run complete |
+| Clean Ubuntu container: `install-host-deps.sh --run-only`, then `autosd.sh start --snapshot`, `ssh`, `stop` | Run on Ubuntu 22.04 (QEMU 6.2.0) and 24.04 (QEMU 8.2.2): AutoSD boots with KVM, answers over SSH, shuts down cleanly |
+| `install-host-deps.sh`, install with dnf | Run in a clean Fedora container (QEMU 10.2.2): packages installed, `autosd.sh check` passes. AutoSD not booted there |
+| `install-build-deps.sh`, install with apt | Run in a clean, privileged Ubuntu 22.04 container: Podman 3.4.4 installed, test run ok. The first try failed on a system without `ca-certificates` (x509 error on the pull); the package is installed now |
+| `install-host-deps.sh`, adding the user to the group of `/dev/kvm` | Run in a container as a user with sudo, with a stand-in file owned by `root:kvm` in place of `/dev/kvm` (a container cannot change the owner of the real one): user added; same session: asks to log in again; new session: `KVM: usable`. Not run against a real `/dev/kvm` |
+| `deploy/setup-all.sh`, all six steps, against a freshly unpacked, untouched image (second AutoSD on other ports, own `RUN_DIR`) | Run: boots it, installs Ankaios, builds (cached), loads five images, six workloads `Running(Ok)`, SOVD and both web pages answer; about 80 s. After a restart of that AutoSD the six workloads came back by themselves. Run again: nothing loaded or restarted |
+| A step of `setup-all.sh` fails | Happened: the Ankaios download inside AutoSD failed on a name lookup (the network's DNS took 10 to 20 s). The downloads retry now. With a forced failure in step 6: names the step, exits 1; the next run finishes |
 | `deploy/setup-all.sh --check` | Run: before (exit 1, AutoSD not running) and after (exit 0) |
