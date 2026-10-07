@@ -8,7 +8,7 @@ flowchart LR
     direction TB
     subgraph RTOS["Eclipse ThreadX RTOS"]
       direction TB
-      SENS["LPS22HB temperature sensor"]
+      SENS["HTS221 temperature sensor"]
       FW["MQTT telemetry app<br/>temperature_degC + rolling counter<br/>1 msg/s · buttons A/B fault injection"]
       NET["NetX Duo · Wi-Fi"]
       SENS --> FW --> NET

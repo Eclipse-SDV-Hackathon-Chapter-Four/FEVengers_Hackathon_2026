@@ -147,6 +147,8 @@ AZ3166 --Wi-Fi--> <this machine>:1883 --QEMU forward--> AutoSD:1883 (mqtt-broker
 
 The firmware connects once and does not reconnect: after restarting AutoSD or the broker, reset the board.
 
+The firmware is in `az3166-firmware/`. Setting the address, building and flashing: [`az3166-firmware.md`](az3166-firmware.md).
+
 ## Next steps
 
 ```bash
