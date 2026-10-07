@@ -1,0 +1,16 @@
+# Created with AI assistance by Claude Code (model: Claude Opus 5.5, model id: claude-opus-5-5, Anthropic).
+# Fault campaign runner: runs repeatable fault scenarios against the Guardian. (skeleton)
+#   podman build -t localhost/fault-campaign-runner:dev -f Containerfile .
+
+# ---- Build stage ----
+FROM docker.io/library/rust:1-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml ./
+COPY src src
+RUN cargo build --release --bins
+
+# ---- Runtime stage ----
+FROM docker.io/library/debian:bookworm-slim
+COPY --from=build /src/target/release/fault-campaign-runner /usr/local/bin/
+USER 65534:65534
+ENTRYPOINT ["fault-campaign-runner"]
