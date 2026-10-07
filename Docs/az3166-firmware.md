@@ -173,5 +173,6 @@ The two driver fixes are explained in [`OUTSIDE_FOLDER_CHANGES.md`](../az3166-fi
 |---|---|
 | Build of `FEVengersApp` from the files in this repository (the tracked files and the two submodules, copied to an empty folder) | Run: `[OK] Build completed successfully!`, 14 s, `mxchip_threadx.bin` 343,856 bytes, Arm GNU Toolchain 13.3.rel1, CMake 3.22.1, Ninja 1.10.1, Ubuntu 22.04 |
 | Flash, Wi-Fi and MQTT connection, data through to the Guardian, the three fault modes | Run with the board, built from this repository with the Wi-Fi settings filled in |
-| `git submodule update --init` in a fresh clone | Not run |
+| Fresh clone from GitHub, `git submodule update --init`, `./scripts/build.sh FEVengersApp clean` | Run: both submodules checked out at the pinned commits (30 s), build completed (14 s), `mxchip_threadx.bin` written; `git status` stays clean after the build |
+| `./scripts/deploy.sh` without a board | Run with a folder in place of the board's drive: the `.bin` is copied; with a destination that does not exist it stops with an error |
 | Build on Windows or macOS (`build.ps1`, `deploy.ps1`) | Not run |
