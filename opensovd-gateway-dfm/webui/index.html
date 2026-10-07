@@ -1,0 +1,294 @@
+<!doctype html>
+<!-- Created with AI assistance (Claude Opus 5.5, Anthropic). -->
+<!-- Fault monitor for the OpenSOVD gateway: reads /sovd/v1/{apps|components}/{id}/faults. -->
+<!-- Logo: put the hackathon logo next to this file as logo.png (served at /ui/logo.png). If it is missing, the slot stays empty. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guardian Fault Monitor</title>
+<style>
+  /* No external resources: works offline in AutoSD. */
+  :root {
+    --bg: #eef1f4; --panel: #ffffff; --fg: #141a22; --muted: #5b6573; --line: #dde2e8;
+    --brand: #2c2255; --brand-2: #f7941e;          /* Eclipse-style purple + orange accent */
+    --accent: #3b2f7a;
+    --bad: #c4291c; --bad-bg: #fdeae8;
+    --warn: #9a5b00; --warn-bg: #fdf1dc;
+    --ok: #23784a; --ok-bg: #e2f4ea;
+    --shadow: 0 1px 2px rgba(20,26,34,.06), 0 4px 16px rgba(20,26,34,.06);
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b24; --fg: #e6e9ef; --muted: #9aa3b2; --line: #272d3a;
+      --brand: #221a45; --brand-2: #ffa43d; --accent: #a99bff;
+      --bad: #ff8a7f; --bad-bg: #3a1c1a;
+      --warn: #f6c56b; --warn-bg: #362913;
+      --ok: #7fd8a4; --ok-bg: #16301f;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+
+  /* Top brand bar */
+  .topbar { background: var(--brand); color: #fff; border-bottom: 3px solid var(--brand-2); }
+  .topbar .in { max-width: 1240px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 16px; }
+  .title { flex: 1; min-width: 0; }
+  .title h1 { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; }
+  .title p { margin: 2px 0 0; font-size: .85rem; opacity: .8; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; background: rgba(255,255,255,.12); padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #5ee08f; box-shadow: 0 0 0 0 rgba(94,224,143,.7); animation: pulse 2s infinite; }
+  .live.paused .dot { background: #f6c56b; animation: none; }
+  .live.down .dot { background: #ff6b5e; animation: none; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(94,224,143,.6); } 70% { box-shadow: 0 0 0 8px rgba(94,224,143,0); } 100% { box-shadow: 0 0 0 0 rgba(94,224,143,0); } }
+  .logo { height: 44px; max-width: 200px; object-fit: contain; background: #fff; border-radius: 8px; padding: 4px 8px; }
+
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 18px; }
+
+  /* Toolbar */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; box-shadow: var(--shadow); }
+  .group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .endpoint { font-family: var(--mono); font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
+  label.lbl { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  input, select, button { font: inherit; font-size: .9rem; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  input { width: 9.5rem; font-family: var(--mono); }
+  button { cursor: pointer; font-weight: 600; }
+  button:hover { border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  button.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* Summary cards */
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); border-top: 4px solid var(--line); }
+  .stat .n { font-size: 2rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .07em; margin-top: 4px; }
+  .stat.bad { border-top-color: var(--bad); }  .stat.bad .n { color: var(--bad); }
+  .stat.warn { border-top-color: var(--warn); } .stat.warn .n { color: var(--warn); }
+  .stat.ok { border-top-color: var(--ok); }    .stat.ok .n { color: var(--ok); }
+  .stat.total { border-top-color: var(--accent); }
+  .stat.bad.hot { background: var(--bad-bg); }
+
+  /* Fault table */
+  .tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; min-width: 820px; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; background: color-mix(in srgb, var(--panel) 92%, var(--fg)); position: sticky; top: 0; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--panel) 95%, var(--accent)); }
+  tr.r-active td:first-child { box-shadow: inset 4px 0 0 var(--bad); }
+  tr.r-past td:first-child { box-shadow: inset 4px 0 0 var(--warn); }
+  tr.r-ok td:first-child { box-shadow: inset 4px 0 0 var(--ok); }
+  td.code { font-family: var(--mono); font-size: .85rem; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  th.num { text-align: right; }
+  .name { font-weight: 600; }
+  .sym { color: var(--muted); font-size: .82rem; }
+  .chip { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .74rem; font-weight: 700; letter-spacing: .05em; }
+  .chip.active { color: var(--bad); background: var(--bad-bg); }
+  .chip.past { color: var(--warn); background: var(--warn-bg); }
+  .chip.ok { color: var(--ok); background: var(--ok-bg); }
+  .mask { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+  .time { font-family: var(--mono); font-size: .78rem; white-space: nowrap; color: var(--muted); }
+  td button { padding: 4px 10px; font-size: .8rem; }
+  .empty { padding: 32px 14px; color: var(--muted); text-align: center; }
+
+  .foot { color: var(--muted); font-size: .82rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+  .err { color: var(--bad); font-weight: 600; }
+
+  @media (max-width: 640px) {
+    .logo { height: 34px; max-width: 120px; }
+    .title h1 { font-size: 1.1rem; }
+    .title p, .live span { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="in">
+    <div class="title">
+      <h1>Battery Thermal Guardian · Fault Monitor</h1>
+      <p>OpenSOVD fault memory · Team FEVengers</p>
+    </div>
+    <div class="live" id="live"><i class="dot"></i><span id="liveText">Live</span></div>
+    <img class="logo" src="logo.jpeg" alt="Eclipse SDV Hackathon" onerror="this.remove()">
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="toolbar" aria-label="Controls">
+    <div class="group">
+      <label for="coll" class="lbl">Entity</label>
+      <select id="coll" aria-label="Entity collection">
+        <option value="apps">apps</option>
+        <option value="components">components</option>
+      </select>
+      <input id="entity" value="battery" aria-label="Entity id" spellcheck="false">
+      <select id="filter" aria-label="Show">
+        <option value="all">All faults</option>
+        <option value="active">Active only</option>
+        <option value="history">Active or occurred</option>
+      </select>
+    </div>
+    <div class="group">
+      <button id="pause" type="button">Pause</button>
+      <button id="clearAll" type="button" class="danger">Clear all</button>
+    </div>
+  </section>
+
+  <section class="summary" aria-label="Summary">
+    <div class="stat bad" id="cardActive"><div class="n" id="nActive">–</div><div class="l">Active now</div></div>
+    <div class="stat warn"><div class="n" id="nPast">–</div><div class="l">Occurred, cleared</div></div>
+    <div class="stat ok"><div class="n" id="nOk">–</div><div class="l">Never failed</div></div>
+    <div class="stat total"><div class="n" id="nTotal">–</div><div class="l">Faults in catalog</div></div>
+  </section>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>State</th><th>Fault</th><th>Code</th><th class="num">Sev.</th>
+          <th class="num">Count</th><th>First</th><th>Last</th><th>Mask</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="9" class="empty">Loading faults…</td></tr></tbody>
+    </table>
+  </div>
+
+  <footer class="foot">
+    <span><span id="updated">–</span> · <code class="endpoint" id="endpoint">…</code></span>
+    <span id="error" class="err" role="status"></span>
+  </footer>
+</main>
+
+<script>
+  // Base of the SOVD API. Same origin as this page (served by the gateway via --serve-dir).
+  const API = "/sovd/v1";
+  const REFRESH_MS = 1000;
+
+  const $ = (id) => document.getElementById(id);
+  let paused = false;
+
+  // Read entity from URL (?app=battery or ?component=hpc), else defaults.
+  const params = new URLSearchParams(location.search);
+  if (params.get("component")) { $("coll").value = "components"; $("entity").value = params.get("component"); }
+  if (params.get("app")) { $("coll").value = "apps"; $("entity").value = params.get("app"); }
+
+  const faultsUrl = () =>
+    `${API}/${$("coll").value}/${encodeURIComponent($("entity").value.trim())}/faults`;
+
+  // Status keys: camelCase from the gateway, snake_case from the standalone bridge.
+  const flag = (s, camel, snake) => Boolean(s[camel] ?? s[snake]);
+
+  function classify(f) {
+    const s = f.status || {};
+    if (flag(s, "testFailed", "test_failed")) return "active";
+    if (flag(s, "testFailedSinceLastClear", "test_failed_since_last_clear")) return "past";
+    return "ok";
+  }
+  const LABEL = { active: "ACTIVE", past: "OCCURRED", ok: "OK" };
+
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const time = (t) => (t ? esc(t.replace("T", " ").replace("Z", "")) : "–");
+
+  function setLive(state) {
+    $("live").className = "live" + (state === "live" ? "" : " " + state);
+    $("liveText").textContent = state === "live" ? "Live" : state === "paused" ? "Paused" : "No connection";
+  }
+
+  function render(items) {
+    const order = { active: 0, past: 1, ok: 2 };
+    const rows = items
+      .map((f) => ({ f, c: classify(f) }))
+      .sort((a, b) => order[a.c] - order[b.c] || a.f.code.localeCompare(b.f.code));
+
+    const nActive = rows.filter((r) => r.c === "active").length;
+    $("nActive").textContent = nActive;
+    $("cardActive").classList.toggle("hot", nActive > 0);
+    $("nPast").textContent = rows.filter((r) => r.c === "past").length;
+    $("nOk").textContent = rows.filter((r) => r.c === "ok").length;
+    $("nTotal").textContent = rows.length;
+
+    const show = $("filter").value;
+    const visible = rows.filter((r) =>
+      show === "all" ? true : show === "active" ? r.c === "active" : r.c !== "ok");
+
+    $("rows").innerHTML = visible.length
+      ? visible.map(({ f, c }) => `
+        <tr class="r-${c}">
+          <td><span class="chip ${c}">${LABEL[c]}</span></td>
+          <td><div class="name">${esc(f.fault_name)}</div>${f.symptom ? `<div class="sym">${esc(f.symptom)}</div>` : ""}</td>
+          <td class="code">${esc(f.code)}</td>
+          <td class="num">${esc(f.severity)}</td>
+          <td class="num">${esc(f.occurrence_counter ?? 0)}</td>
+          <td class="time">${time(f.first_occurrence)}</td>
+          <td class="time">${time(f.last_occurrence)}</td>
+          <td class="mask">${esc((f.status || {}).mask ?? "")}</td>
+          <td><button type="button" data-clear="${esc(f.code)}">Clear</button></td>
+        </tr>`).join("")
+      : `<tr><td colspan="9" class="empty">${rows.length ? "No faults match this filter." : "No faults reported for this entity."}</td></tr>`;
+  }
+
+  async function refresh() {
+    const url = faultsUrl();
+    $("endpoint").textContent = url;
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.message || `HTTP ${res.status}`);
+      render(body.items || []);
+      $("error").textContent = "";
+      $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      setLive(paused ? "paused" : "live");
+    } catch (e) {
+      $("error").textContent = `Cannot read faults: ${e.message}. Check that the gateway and DFM are running.`;
+      setLive("down");
+    }
+  }
+
+  async function clear(code) {
+    const url = code ? `${faultsUrl()}/${encodeURIComponent(code)}` : faultsUrl();
+    try {
+      const res = await fetch(url, { method: "DELETE" });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      $("error").textContent = "";
+    } catch (e) {
+      $("error").textContent = `Clear failed: ${e.message}`;
+    }
+    refresh();
+  }
+
+  // "Clear all" asks for a second click instead of a browser dialog.
+  let armed = false;
+  const disarm = () => { armed = false; $("clearAll").textContent = "Clear all"; $("clearAll").classList.remove("armed"); };
+  $("clearAll").addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      $("clearAll").textContent = "Click again to clear all";
+      $("clearAll").classList.add("armed");
+      setTimeout(disarm, 3000);
+      return;
+    }
+    disarm();
+    clear(null);
+  });
+  $("rows").addEventListener("click", (e) => {
+    const code = e.target.getAttribute("data-clear");
+    if (code) clear(code);
+  });
+  $("pause").addEventListener("click", () => {
+    paused = !paused;
+    $("pause").textContent = paused ? "Resume" : "Pause";
+    setLive(paused ? "paused" : "live");
+  });
+  ["coll", "entity", "filter"].forEach((id) => $(id).addEventListener("change", refresh));
+
+  refresh();
+  setInterval(() => { if (!paused) refresh(); }, REFRESH_MS);
+</script>
+</body>
+</html>
