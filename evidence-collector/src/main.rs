@@ -98,7 +98,7 @@ struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         // Defaults of battery-thermal-guardian/config/guardian.toml [signal]
-        Limits { min_c: -40.0, max_c: 150.0, max_rate_c_per_s: 10.0, stuck_window_ms: 30000, stale_timeout_ms: 3000 }
+        Limits { min_c: -40.0, max_c: 150.0, max_rate_c_per_s: 10.0, stuck_window_ms: 3000, stale_timeout_ms: 3000 }
     }
 }
 
@@ -133,16 +133,20 @@ struct Sample {
     rx_ms: u64,
 }
 
-/// One evidence row: a fault raised or cleared, with the values behind it.
+/// One evidence row: a fault raised / cleared or a mitigation requested /
+/// released, with the values behind it.
 #[derive(Clone, Serialize)]
 struct FaultRow {
     n: usize,
+    /// "fault" or "mitigation"
+    kind: &'static str,
     at_ms: u64,
     seq: Option<u64>,
+    /// Fault name (TempSignalStuck, ...) or mitigation action (REDUCE_POWER_MAX_COOLING, ...).
     fault: String,
     catalog_id: Option<String>,
     class: Option<String>,
-    /// RAISED or CLEARED
+    /// RAISED / CLEARED (fault) or REQUESTED / RELEASED (mitigation)
     status: String,
     /// Guardian state after the fault was processed.
     state: Option<String>,
@@ -182,7 +186,15 @@ struct RunSummary {
     faults: usize,
     raised: usize,
     cleared: usize,
+    mitigations: usize,
     messages: usize,
+}
+
+/// (fault events, raised, cleared, mitigation events) of a list of rows.
+fn counts(rows: &[FaultRow]) -> (usize, usize, usize, usize) {
+    let faults = rows.iter().filter(|r| r.kind == "fault").count();
+    let raised = rows.iter().filter(|r| r.status == "RAISED").count();
+    (faults, raised, faults - raised, rows.len() - faults)
 }
 
 #[derive(Default)]
@@ -268,16 +280,18 @@ fn topic_name(kind: Kind, resource: Option<u16>) -> &'static str {
 async fn process(shared: Shared, limits: Arc<Limits>, mut rx: tokio::sync::mpsc::UnboundedReceiver<Incoming>) {
     while let Some(m) = rx.recv().await {
         let topic = topic_name(m.kind, m.resource);
-        let mut fault_run: Option<String> = None;
+        let mut row_run: Option<(String, &'static str, Option<String>)> = None;
         {
             let mut g = shared.lock().unwrap();
+            let state_now = g.live.state.clone();
             if let Some(run) = g.run.as_mut() {
                 run.raw.push(json!({
                     "rx_ms": m.rx_ms, "topic": topic,
                     "message_id": m.message_id, "event": m.payload,
                 }));
-                if topic == "fault" {
-                    fault_run = Some(run.id.clone());
+                if topic == "fault" || topic == "mitigation" {
+                    // Mitigation events carry no state: use the Guardian state known now.
+                    row_run = Some((run.id.clone(), topic, state_now));
                 }
             }
             match topic {
@@ -311,8 +325,8 @@ async fn process(shared: Shared, limits: Arc<Limits>, mut rx: tokio::sync::mpsc:
                 _ => {}
             }
         }
-        // Fault while recording: build the row a moment later (trigger sample may still be in flight).
-        if let Some(run_id) = fault_run {
+        // Fault / mitigation while recording: build the row a moment later (trigger sample may still be in flight).
+        if let Some((run_id, kind, state_now)) = row_run {
             let sh = shared.clone();
             let limits = limits.clone();
             tokio::spawn(async move {
@@ -320,8 +334,8 @@ async fn process(shared: Shared, limits: Arc<Limits>, mut rx: tokio::sync::mpsc:
                 let mut g = sh.lock().unwrap();
                 let row_n = g.run.as_ref().filter(|r| r.id == run_id).map(|r| r.rows.len() + 1);
                 if let Some(n) = row_n {
-                    let row = build_row(&g.samples, &limits, n, &m.payload, m.rx_ms);
-                    info!(fault = %row.fault, status = %row.status, "evidence row {}", n);
+                    let row = build_row(&g.samples, &limits, n, kind, state_now, &m.payload, m.rx_ms);
+                    info!(kind, event = %row.fault, status = %row.status, "evidence row {}", n);
                     if let Some(run) = g.run.as_mut() {
                         run.rows.push(row);
                     }
@@ -332,7 +346,15 @@ async fn process(shared: Shared, limits: Arc<Limits>, mut rx: tokio::sync::mpsc:
 }
 
 /// Finds the triggering sample and the one before it in the collector's own buffer.
-fn build_row(samples: &VecDeque<Sample>, limits: &Limits, n: usize, ev: &Value, rx_ms: u64) -> FaultRow {
+fn build_row(
+    samples: &VecDeque<Sample>,
+    limits: &Limits,
+    n: usize,
+    kind: &'static str,
+    state_now: Option<String>,
+    ev: &Value,
+    rx_ms: u64,
+) -> FaultRow {
     let s = |k: &str| ev.get(k).and_then(Value::as_str).map(str::to_string);
     let trigger = ev.get("trigger").filter(|t| !t.is_null());
 
@@ -385,23 +407,29 @@ fn build_row(samples: &VecDeque<Sample>, limits: &Limits, n: usize, ev: &Value, 
     };
 
     let at_ms = ev.get("at_ms").and_then(Value::as_u64).unwrap_or(rx_ms);
-    let fault = s("fault").unwrap_or_else(|| "?".into());
+    // FaultEvent: fault / detail / state; MitigationEvent: action / reason (no state).
+    let is_mitigation = kind == "mitigation";
+    let fault = s(if is_mitigation { "action" } else { "fault" }).unwrap_or_else(|| "?".into());
     let status = s("status").unwrap_or_else(|| "?".into());
-    let (limit, measured, broken) =
-        check_limit(&fault, samples, limits, current.as_ref(), rate_c_per_s, at_ms);
+    let (limit, measured, broken) = if is_mitigation {
+        (None, None, None)
+    } else {
+        check_limit(&fault, samples, limits, current.as_ref(), rate_c_per_s, at_ms)
+    };
     // Only a RAISED row claims a violation; CLEARED shows the values for context.
     let limit_broken = if status == "RAISED" { broken } else { None };
 
     FaultRow {
         n,
+        kind,
         at_ms,
         seq: ev.get("seq").and_then(Value::as_u64),
         fault,
         catalog_id: s("catalog_id"),
         class: s("class"),
         status,
-        state: s("state"),
-        detail: s("detail").unwrap_or_default(),
+        state: s("state").or(state_now),
+        detail: s(if is_mitigation { "reason" } else { "detail" }).unwrap_or_default(),
         cause,
         previous,
         current,
@@ -499,7 +527,7 @@ async fn status(State(app): State<App>) -> Json<Value> {
     let g = app.shared.lock().unwrap();
     let rows_src = g.run.as_ref().map(|r| &r.rows).unwrap_or(&g.last_rows);
     let rows: Vec<&FaultRow> = rows_src.iter().rev().take(app.args.table_rows).collect();
-    let raised = rows_src.iter().filter(|r| r.status == "RAISED").count();
+    let (faults, raised, cleared, mitigations) = counts(rows_src);
     let hb_age = g.live.hb_rx_ms.map(|t| now.saturating_sub(t));
     Json(json!({
         "now_ms": now,
@@ -507,8 +535,10 @@ async fn status(State(app): State<App>) -> Json<Value> {
         "run_id": g.run.as_ref().map(|r| r.id.clone()),
         "started_ms": g.run.as_ref().map(|r| r.started_ms),
         "total": rows_src.len(),
+        "faults": faults,
         "raised": raised,
-        "cleared": rows_src.len() - raised,
+        "cleared": cleared,
+        "mitigations": mitigations,
         "rows": rows,
         "live": {
             "temp": g.live.temp,
@@ -558,16 +588,17 @@ async fn stop(State(app): State<App>) -> Response {
     };
     let stopped = now_ms();
     let dir = app.args.out.join(&run.id);
-    let raised = run.rows.iter().filter(|r| r.status == "RAISED").count();
+    let (faults, raised, cleared, mitigations) = counts(&run.rows);
     let summary = RunSummary {
         id: run.id.clone(),
         dir: dir.display().to_string(),
         started_ms: run.started_ms,
         stopped_ms: stopped,
         duration_ms: stopped.saturating_sub(run.started_ms),
-        faults: run.rows.len(),
+        faults,
         raised,
-        cleared: run.rows.len() - raised,
+        cleared,
+        mitigations,
         messages: run.raw.len(),
     };
     if let Err(e) = write_run(&dir, &run, &summary, &sovd_after).await {
@@ -601,20 +632,25 @@ async fn write_run(dir: &PathBuf, run: &Run, summary: &RunSummary, sovd_after: &
     tokio::fs::write(dir.join("events.jsonl"), jsonl).await?;
     tokio::fs::write(dir.join("faults.json"), serde_json::to_vec_pretty(&run.rows)?).await?;
 
+    // Per fault: raised / cleared; per mitigation: requested / released.
     let mut per_fault: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut per_mitigation: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for r in &run.rows {
-        let e = per_fault.entry(r.fault.as_str()).or_default();
-        if r.status == "RAISED" { e.0 += 1 } else { e.1 += 1 }
+        let map = if r.kind == "mitigation" { &mut per_mitigation } else { &mut per_fault };
+        let e = map.entry(r.fault.as_str()).or_default();
+        if r.status == "RAISED" || r.status == "REQUESTED" { e.0 += 1 } else { e.1 += 1 }
     }
-    let counts: Value = per_fault
-        .iter()
-        .map(|(k, (r, c))| (k.to_string(), json!({"raised": r, "cleared": c})))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
+    let to_json = |m: &BTreeMap<&str, (usize, usize)>, a: &str, b: &str| -> Value {
+        m.iter()
+            .map(|(k, (x, y))| (k.to_string(), json!({(a): x, (b): y})))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    };
     let full = json!({
         "_generated": "Created with AI assistance (Claude Opus 5.5, Anthropic)",
         "run": summary,
-        "per_fault": counts,
+        "per_fault": to_json(&per_fault, "raised", "cleared"),
+        "per_mitigation": to_json(&per_mitigation, "requested", "released"),
         "sovd_before": run.sovd_before,
         "sovd_after": sovd_after,
     });
@@ -628,15 +664,16 @@ fn report_md(run: &Run, s: &RunSummary) -> String {
     let f = |x: Option<f64>| x.map(|x| format!("{x:+.2}")).unwrap_or_else(|| "–".into());
     let mut md = format!(
         "# Evidence run {}\n\n> Created with AI assistance (Claude Opus 5.5, Anthropic).\n\n\
-         | | |\n|---|---|\n| Start | {} UTC |\n| Duration | {:.1} s |\n| Fault events | {} ({} raised, {} cleared) |\n| uProtocol messages | {} |\n\n\
-         | # | Time (UTC) | Fault | Event | Previous °C | Current °C | Δ °C | Rate °C/s | Limit | Measured | Confirmed | Cause | State | Guardian reason |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
-        s.id, utc_stamp(s.started_ms), s.duration_ms as f64 / 1000.0, s.faults, s.raised, s.cleared, s.messages
+         | | |\n|---|---|\n| Start | {} UTC |\n| Duration | {:.1} s |\n| Fault events | {} ({} raised, {} cleared) |\n| Mitigation events | {} |\n| uProtocol messages | {} |\n\n\
+         | # | Time (UTC) | Kind | Fault / mitigation | Event | Previous °C | Current °C | Δ °C | Rate °C/s | Limit | Measured | Confirmed | Cause | State | Guardian reason |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        s.id, utc_stamp(s.started_ms), s.duration_ms as f64 / 1000.0, s.faults, s.raised, s.cleared,
+        s.mitigations, s.messages
     );
     for r in &run.rows {
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
-            r.n, utc_stamp(r.at_ms), r.fault, r.status, v(&r.previous), v(&r.current),
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            r.n, utc_stamp(r.at_ms), r.kind, r.fault, r.status, v(&r.previous), v(&r.current),
             f(r.delta_c), f(r.rate_c_per_s),
             r.limit.clone().unwrap_or_else(|| "–".into()),
             r.measured.clone().unwrap_or_else(|| "–".into()),

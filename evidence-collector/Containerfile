@@ -10,7 +10,7 @@
 # Logo: web/logo.jpeg is baked into the image (must exist at build time).
 
 # ---- Build stage ----
-FROM docker.io/library/rust:1-bookworm AS build
+FROM docker.io/library/rust:1.99.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml ./
 COPY src src

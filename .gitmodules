@@ -1,0 +1,6 @@
+[submodule "az3166-firmware/deps/lib/threadx"]
+	path = az3166-firmware/deps/lib/threadx
+	url = https://github.com/eclipse-threadx/threadx.git
+[submodule "az3166-firmware/deps/lib/netxduo"]
+	path = az3166-firmware/deps/lib/netxduo
+	url = https://github.com/eclipse-threadx/netxduo.git

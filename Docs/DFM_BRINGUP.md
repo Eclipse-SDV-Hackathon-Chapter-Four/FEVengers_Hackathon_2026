@@ -50,7 +50,7 @@ It is a two-stage build:
 
 | Stage | Purpose |
 |---|---|
-| Build | Rust image clones `fault-lib` and compiles `dfm_bin` and the demo reporter `tst_app`. `clang`/`libclang` are needed by iceoryx2's build; the pinned nightly toolchain is installed automatically. |
+| Build | Rust image clones `fault-lib` and compiles `dfm_bin` and the demo reporter `tst_app`. `clang`/`libclang` are needed by iceoryx2's build; it is built with Rust 1.99.0, the compiler of the build image, at the fault-lib commit the Guardian and the gateway use (`12dac502`). |
 | Runtime | Small Debian image with only the two binaries and the sample fault catalogs from `fault-lib`. Default command: `dfm_bin --catalog-dir /catalogs --storage-dir /store`. |
 
 Build:

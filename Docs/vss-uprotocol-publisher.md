@@ -41,6 +41,38 @@ MQTT message, as soon as it arrives; it has no timer of its own.
 
 ## Run
 
+There are the same two setups as for the Guardian (see
+[Run the full chain](battery-thermal-guardian.md#run-the-full-chain)); do not
+run both at once, both use port 1883 on this machine.
+
+### On AutoSD (reference setup)
+
+The publisher runs as the Ankaios workload `vss-publisher`, next to the
+`mqtt-broker` workload, both with the host network
+([`deploy/ankaios-manifest.yaml`](../deploy/ankaios-manifest.yaml)). It
+connects to the broker at `localhost:1883`, the default in
+[`config/publisher.toml`](../vss-uprotocol-publisher/config/publisher.toml). It
+is built and deployed with the rest of the system, see
+[On AutoSD](battery-thermal-guardian.md#on-autosd-reference-setup).
+
+The AZ3166 publishes to `<this machine's Wi-Fi IP>:1883`; QEMU forwards it to
+the broker in AutoSD. To check the publisher there:
+
+```sh
+# Send one reading by hand from this machine (port 1883 is forwarded)
+mosquitto_pub -h localhost -p 1883 -t FEVengers_MQTT/telemetry \
+  -m '{"temperature_degC": 24.65, "counter": 1}'
+
+# Inside AutoSD: the publisher's log, and the uMessages it sends
+./autosd/autosd.sh ssh
+podman ps                                   # name of the vss-publisher container
+podman logs -f <vss-publisher container>
+podman run --rm --net=host --entrypoint vss-listen localhost/vss-uprotocol-publisher:dev \
+  -c /etc/vss-uprotocol-publisher/publisher.toml
+```
+
+### On one machine (development)
+
 From the repository root:
 
 ```sh
@@ -68,17 +100,19 @@ that is `mosquitto_pub` (or the publisher) connecting. Stop the broker with
 `docker stop mosquitto`.
 
 To run it together with the Guardian and replay a recorded MQTT log, see
-[Run the full chain](battery-thermal-guardian.md#run-the-full-chain).
+[On one machine](battery-thermal-guardian.md#on-one-machine-development).
 
-With the real board, point the AZ3166 at the broker's address on port 1883,
+With the real board, point the AZ3166 at this machine's address on port 1883,
 or start the publisher with `--mqtt-host <broker address>` if the broker runs
 elsewhere. If the broker is not reachable, the publisher retries every second.
 
-As a container (Podman / Ankaios workload):
+As a container (arguments after the image name replace its default command,
+so pass `--config` too):
 
 ```sh
 podman build -t vss-uprotocol-publisher -f vss-uprotocol-publisher/Containerfile vss-uprotocol-publisher
-podman run --rm --net=host vss-uprotocol-publisher --mqtt-host 192.168.1.10
+podman run --rm --net=host vss-uprotocol-publisher \
+  --config /etc/vss-uprotocol-publisher/publisher.toml --mqtt-host 192.168.1.10
 ```
 
 ### Check the output without the Guardian
@@ -121,15 +155,15 @@ vss-uprotocol-publisher/target/release/vss-sim stuck -c vss-uprotocol-publisher/
 | Scenario | Class | What vss-sim does | Guardian reaction (observed with `config/demo.toml`) |
 |---|---|---|---|
 | `nominal` | – | stable ~30 °C | MONITORING, no faults |
-| `overheat` | thermal | ramp to 72 °C, hold, cool down | WARNING → CRITICAL → MITIGATING (`REDUCE_POWER_MAX_COOLING`). demo.toml's 10 s mitigation timeout expires during the hold, so `OCCUPANT_EVACUATION_WARNING` follows; after cooling back to MONITORING, mitigations released |
-| `runaway` | thermal | ramp to 72 °C and keep rising | WARNING → CRITICAL → MITIGATING; every `mitigation_timeout_ms` back to CRITICAL with `OCCUPANT_EVACUATION_WARNING` re-asserted |
-| `stuck` | Signal | the device repeats its last reading in the fault window (rolling counter and value frozen) | `TransportDuplicate`, then `TempSignalStuck` after `stuck_window_ms` (3 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the counter increases again |
+| `overheat` | thermal | ramp to 72 °C, hold, cool down | WARNING → CRITICAL → MITIGATING (`REDUCE_POWER_MAX_COOLING`). demo.toml's 10 s mitigation timeout expires during the hold, so the Guardian goes back to CRITICAL (mitigation failed) and MITIGATING again; after cooling back to MONITORING, mitigations released |
+| `runaway` | thermal | ramp to 72 °C and keep rising | WARNING → CRITICAL → MITIGATING; every `mitigation_timeout_ms` back to CRITICAL (mitigation failed) and MITIGATING again |
+| `stuck` | Signal | the device repeats its last reading in the fault window (rolling counter and value frozen) | `TempSignalStuck` after `stuck_window_ms` (3 s) → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; cleared when the counter increases again |
 | `spike` | Signal | every 4th sample +40 °C in the fault window | `TempSignalSpike`, spiked samples discarded, state unchanged; cleared after 5 good samples |
 | `out-of-range` | Signal | 200 °C in the fault window | `TempOutOfRange`; no sample is accepted, so after 3 s DEGRADED because of `TempOutOfRange` |
 | `dropout` | Source | nothing sent in the fault window | `TempSourceConnectionLost` after 3 s → DEGRADED; cleared by the next message |
-| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | `TransportDelay`; delayed samples discarded, so after 3 s DEGRADED because of `TransportDelay`. At the end of the window the last delayed samples arrive after newer ones: `TransportOutOfOrder` |
-| `duplicate` | Transport | every sample sent twice in the fault window | `TransportDuplicate`, duplicates discarded, state unchanged |
-| `reorder` | Transport | consecutive samples swapped in the fault window | `TransportOutOfOrder`, older sample discarded, state unchanged. Only some swapped pairs are detected, see [Current limits](#current-limits) |
+| `delay` | Transport | samples sent 2 s late in the fault window (the uMessage keeps its creation time) | delayed samples discarded; no usable sample for 3 s → DEGRADED, `MONITORING_UNAVAILABLE_WARNING`; back to MONITORING after the window |
+| `duplicate` | Transport | every sample sent twice in the fault window | duplicates discarded, state unchanged |
+| `reorder` | Transport | consecutive samples swapped in the fault window | older sample discarded, state unchanged; not every swapped pair is recognized |
 
 Times are from runs with the fault window at 4–12 s. Every fault clears
 after the window; DEGRADED returns to MONITORING.
@@ -161,10 +195,10 @@ To run it with the Guardian, see
 Topic `FEVengers_MQTT/telemetry` (configurable), one JSON object per second:
 
 ```json
-{"pressure_hPa":1215.87,"temperature_degC":24.65,"humidity_perc":54.11,
- "acceleration_mg":[-38.43,13.85,1011.26],"magnetic_mG":[-91.50,-99.00,-384.00],
- "counter":31}
+{"temperature_degC": 24.65, "counter": 31}
 ```
+
+This is what the board's firmware sends ([`az3166-firmware.md`](az3166-firmware.md)).
 
 Two keys are used; their names are set in `[mapping]` (`temperature_field`,
 `counter_field`):
@@ -228,15 +262,3 @@ cd vss-uprotocol-publisher && cargo test
 
 `vss-listen` and `vss-sim` (`src/bin/`) are test tools and have no tests of
 their own.
-
-## Current limits
-
-- Readings that MQTT delivers back to back after a Wi-Fi hiccup become
-  uMessages milliseconds apart and can trip the Guardian's spike check.
-- `vss-sim` injects one fault per run, in one window; the delay of the
-  `delay` scenario is fixed at 2 s.
-- `reorder`: vss-sim sends each swapped pair back to back. up-transport-zenoh
-  hands every received message to the listener in its own task, so two
-  messages that arrive within microseconds can reach the Guardian in either
-  order, and most swapped pairs arrive in the right order again. The fault is
-  detected, but not for every pair.

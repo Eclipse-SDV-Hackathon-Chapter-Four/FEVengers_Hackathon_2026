@@ -11,7 +11,7 @@
 # container engine (Podman or Docker). If one already works, nothing is changed.
 #
 # Supported package managers: apt (Ubuntu/Debian), dnf (Fedora/RHEL),
-# pacman (Arch), brew (macOS). sudo is called only for the package install.
+# brew (macOS). sudo is called only for the package install.
 #
 # Tunables (environment):
 #   PLATFORM=linux/amd64   target of the images (the AutoSD image we use is x86_64)
@@ -73,18 +73,13 @@ install_podman() {
   if have apt-get; then
     log "installing podman with apt (sudo will ask for your password)"
     $sudo apt-get update
-    $sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
+    # ca-certificates: without it every pull from a registry fails (x509).
+    $sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs ca-certificates
     if needs_emulation; then $sudo apt-get install -y qemu-user-static; fi
   elif have dnf; then
     log "installing podman with dnf (sudo will ask for your password)"
     $sudo dnf install -y podman
     if needs_emulation; then $sudo dnf install -y qemu-user-static; fi
-  elif have pacman; then
-    log "installing podman with pacman (sudo will ask for your password)"
-    $sudo pacman -S --needed --noconfirm podman slirp4netns fuse-overlayfs
-    if needs_emulation; then
-      $sudo pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt
-    fi
   elif have brew; then
     log "installing podman with brew"
     brew install podman
@@ -94,7 +89,7 @@ install_podman() {
     fi
     podman machine start 2>/dev/null || true
   else
-    fail "no supported package manager found (apt, dnf, pacman, brew). Install Podman or Docker by hand, then rerun with --check."
+    fail "no supported package manager found (apt, dnf, brew). Install Podman or Docker by hand, then rerun with --check."
   fi
 }
 

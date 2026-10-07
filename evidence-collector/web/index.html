@@ -76,6 +76,7 @@
   .tile .l { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; }
   .tile .v { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
   .tile .v small { font-size: .8rem; font-weight: 500; color: var(--muted); }
+  .tile { min-width: 0; } .tile .v { overflow-wrap: anywhere; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: var(--muted); vertical-align: middle; }
   .dot.up { background: var(--ok); } .dot.down { background: var(--bad); }
 
@@ -102,6 +103,13 @@
   .chip { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .72rem; font-weight: 700; letter-spacing: .05em; }
   .chip.RAISED { color: var(--bad); background: var(--bad-bg); }
   .chip.CLEARED { color: var(--ok); background: var(--ok-bg); }
+  .chip.REQUESTED { color: #fff; background: var(--brand-2); }
+  .chip.RELEASED { color: var(--brand-2); background: color-mix(in srgb, var(--brand-2) 14%, transparent); }
+  tr.r-REQUESTED td:first-child { box-shadow: inset 4px 0 0 var(--brand-2); }
+  tr.r-RELEASED td:first-child { box-shadow: inset 4px 0 0 color-mix(in srgb, var(--brand-2) 45%, transparent); }
+  tr.k-mitigation td { background: color-mix(in srgb, var(--brand-2) 5%, transparent); }
+  .kind { display: block; font-size: .68rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+  .kind.mitigation { color: var(--brand-2); }
   .chip.ok { color: var(--ok); background: var(--ok-bg); }
   .lim { white-space: nowrap; }
   .chip.state { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -158,6 +166,7 @@
         <div class="tile"><div class="l">Guardian state</div><div class="v" id="state">–</div></div>
         <div class="tile"><div class="l">Guardian</div><div class="v" id="alive">–</div></div>
         <div class="tile"><div class="l">Active faults</div><div class="v" id="active">–</div></div>
+        <div class="tile"><div class="l">Active mitigations</div><div class="v" id="mitig">–</div></div>
       </div>
       <div class="err" id="error" role="status"></div>
     </div>
@@ -167,19 +176,19 @@
 
   <section class="card" aria-label="Evidence">
     <div class="cardhead">
-      <h2>Fault evidence <span class="muted" style="font-weight:400">· newest first</span></h2>
+      <h2>Fault &amp; mitigation evidence <span class="muted" style="font-weight:400">· newest first</span></h2>
       <span class="counts" id="counts">–</span>
     </div>
     <div class="tablewrap">
       <table>
         <thead>
           <tr>
-            <th>#</th><th>Time</th><th>Fault</th><th>Event</th>
+            <th>#</th><th>Time</th><th>Fault / mitigation</th><th>Event</th>
             <th>Previous → Current (°C)</th><th class="num">Δ °C</th><th class="num">Rate °C/s</th>
             <th>Limit check</th><th>State</th><th>Guardian reason</th>
           </tr>
         </thead>
-        <tbody id="rows"><tr><td colspan="10" class="empty">Press <b>Start evidence</b>. Every fault raised or cleared will appear here with the values that caused it.</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="10" class="empty">Press <b>Start evidence</b>. Every fault raised / cleared and every mitigation requested / released will appear here with the values that caused it.</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -218,9 +227,11 @@
       : L.guardian_alive ? `<span class="dot up"></span>alive` : `<span class="dot down"></span>silent ${Math.round(L.hb_age_ms / 1000)} s`;
     const af = Array.isArray(L.active_faults) ? L.active_faults : [];
     $("active").innerHTML = af.length ? `<span class="up">${af.length}</span> <small>${esc(af.join(", "))}</small>` : "0";
+    const am = Array.isArray(L.active_mitigations) ? L.active_mitigations : [];
+    $("mitig").innerHTML = am.length ? `<span style="color:var(--brand-2)">${am.length}</span> <small>${esc(am.join(", "))}</small>` : "0";
 
     $("counts").innerHTML = s.total
-      ? `<b>${s.total}</b> events · <b>${s.raised}</b> raised · <b>${s.cleared}</b> cleared${s.total > s.rows.length ? ` · showing newest ${s.rows.length}` : ""}`
+      ? `<b>${s.total}</b> events · <b>${s.raised}</b> raised · <b>${s.cleared}</b> cleared · <b>${s.mitigations ?? 0}</b> mitigation${s.total > s.rows.length ? ` · showing newest ${s.rows.length}` : ""}`
       : "no events";
 
     const rows = s.rows || [];
@@ -228,10 +239,10 @@
     $("rows").innerHTML = rows.length ? rows.map((r) => {
       const isNew = !seen.has(key(r)); seen.add(key(r));
       const dir = r.delta_c > 0 ? "up" : r.delta_c < 0 ? "down" : "";
-      return `<tr class="r-${esc(r.status)}${isNew ? " new" : ""}">
+      return `<tr class="r-${esc(r.status)} k-${esc(r.kind || "fault")}${isNew ? " new" : ""}">
         <td class="num mono">${r.n}</td>
         <td class="mono">${clock(r.at_ms)}</td>
-        <td class="fault">${esc(r.fault)}<small>${esc(r.catalog_id || r.class || "")}</small></td>
+        <td class="fault"><span class="kind ${esc(r.kind || "fault")}">${r.kind === "mitigation" ? "mitigation" : "fault"}</span>${esc(r.fault)}<small>${esc(r.catalog_id || r.class || "")}</small></td>
         <td><span class="chip ${esc(r.status)}">${esc(r.status)}</span>${r.cause === "timer" ? `<span class="rc">timeout</span>` : ""}</td>
         <td>${sampleCell(r.previous, r.current)}</td>
         <td class="num ${dir}">${sign(r.delta_c)}</td>
@@ -241,7 +252,7 @@
         <td>${r.state ? `<span class="chip state">${esc(r.state)}</span>` : "–"}</td>
         <td class="reason">${esc(r.detail)}</td>
       </tr>`;
-    }).join("") : `<tr><td colspan="10" class="empty">${recording ? "Recording… waiting for the first fault event." : "Press <b>Start evidence</b>. Every fault raised or cleared will appear here with the values that caused it."}</td></tr>`;
+    }).join("") : `<tr><td colspan="10" class="empty">${recording ? "Recording… waiting for the first fault or mitigation event." : "Press <b>Start evidence</b>. Every fault raised / cleared and every mitigation requested / released will appear here with the values that caused it."}</td></tr>`;
   }
 
   async function poll() {

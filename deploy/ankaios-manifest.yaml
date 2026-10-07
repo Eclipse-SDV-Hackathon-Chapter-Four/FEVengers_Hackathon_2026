@@ -4,14 +4,15 @@
 # Docs/Static_View.png. The localhost/*:dev images are produced by
 # deploy/build-images.sh and must be loaded on the target before this is applied.
 #
-# Applied to the QEMU image with deploy/deploy-to-autosd.sh: all five
-# workloads reach Running(Ok). Verified there with the real board:
-# board -> MQTT -> publisher -> Guardian -> DFM -> OpenSOVD gateway.
+# Applied to the QEMU image with deploy/deploy-to-autosd.sh. Verified there
+# with the real board: board -> MQTT -> publisher -> Guardian -> DFM ->
+# OpenSOVD gateway.
 #
 # The target must provide (lost on reboot unless recreated, /tmp is a tmpfs):
 #   /tmp/iceoryx2                 iceoryx2 discovery files, shared by guardian, dfm and opensovd-gateway
 #   /var/lib/fevengers/catalogs   copy of the repo's catalogs/ folder
 #   /var/lib/fevengers/webui      copy of opensovd-gateway-dfm/webui/ (fault monitor page)
+#   /var/lib/fevengers/evidence   evidence runs written by the evidence collector
 #
 # Data path:
 #   AZ3166 --MQTT--> mqtt-broker --> vss-publisher --uProtocol/Zenoh--> guardian
@@ -87,7 +88,7 @@ workloads:
   # SOVD path /sovd/v1/apps/battery/faults and the fault monitor page on /ui/.
   # Port 7690 is the one of the architecture diagram; autosd.sh forwards it to
   # the host. "--dfm-fault-app battery" must equal the id of the fault catalog.
-  # It replaces the standalone SOVD fault bridge (sovd/sovd-fault-bridge).
+  # It replaced the standalone SOVD fault bridge, which is no longer in the repository.
   opensovd-gateway:
     runtime: podman
     agent: agent_A
@@ -105,3 +106,20 @@ workloads:
         - "--volume=/tmp/iceoryx2:/tmp/iceoryx2"
         - "--volume=/var/lib/fevengers/webui:/webui:ro"
       commandArgs: ["--dfm-fault-app", "battery", "--serve-dir", "/ui:/webui"]
+
+  # Evidence collector: independent observer. Subscribes over uProtocol/Zenoh
+  # to the Guardian's events and to the raw samples of the publisher, checks
+  # every fault against its own copy of the limits, and writes one folder per
+  # evidence run. Web UI and REST on port 7700. Only Zenoh and HTTP: no
+  # iceoryx2, so none of the DFM's IPC options. Host network for Zenoh
+  # scouting and to reach the SOVD gateway on 127.0.0.1:7690.
+  evidence-collector:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/evidence-collector:dev
+      commandOptions:
+        - "--net=host"
+        - "--security-opt=label=disable"
+        - "--volume=/var/lib/fevengers/evidence:/evidence"
